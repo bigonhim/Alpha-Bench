@@ -1,0 +1,657 @@
+# Alpha Foundry template library.
+# Each template expands its {slots} into BRAIN Fast Expressions. Slot kinds:
+#   fields: [...]        explicit data fields
+#   select: {category, unit}  all catalog fields matching (local fields only when mining locally)
+#   windows: [...]       lookback windows
+#   groups: [...]        neutralization groups; "capbucket" = bucket(rank(cap), range="0.1,1,0.1")
+#   values: [...]        literal text alternatives (operators, signs, constants)
+# idea/category/horizon tags drive diversity; settings are the default search grid per template.
+
+defaults:
+  settings:
+    decay: [0, 4]
+    neutralization: [SUBINDUSTRY, INDUSTRY]
+    truncation: [0.08]
+
+templates:
+  # ------------------------------------------------------------------ reversion (price-volume, short)
+  - id: rev_delta
+    idea: reversion
+    category: pv
+    horizon: short
+    expr: "rank(-ts_delta({price}, {w}))"
+    slots: {price: {fields: [close, vwap]}, w: {windows: [3, 5, 10]}}
+    settings: {decay: [0, 3, 6], neutralization: [SUBINDUSTRY, INDUSTRY, MARKET]}
+    rationale: "Short-term overreaction: prices that moved sharply over a few days tend to partially revert."
+  - id: rev_sumret_group
+    idea: reversion
+    category: pv
+    horizon: short
+    expr: "group_neutralize(-ts_sum(returns, {w}), {g})"
+    slots: {w: {windows: [3, 5, 10]}, g: {groups: [industry, subindustry]}}
+    settings: {decay: [0, 3, 6]}
+    rationale: "Stocks that outperformed their peers over the last days tend to give back part of the gain."
+  - id: rev_midpoint
+    idea: reversion
+    category: pv
+    horizon: short
+    expr: "rank({ref} - close)"
+    slots: {ref: {values: ["(high + low) / 2", "vwap", "open"]}}
+    settings: {decay: [0, 4, 8], neutralization: [MARKET, SUBINDUSTRY]}
+    rationale: "Closing far from the day's typical price signals temporary order imbalance that reverts."
+  - id: rev_zscore
+    idea: reversion
+    category: pv
+    horizon: short
+    expr: "-ts_zscore({price}, {w})"
+    slots: {price: {fields: [close, vwap]}, w: {windows: [5, 10, 20]}}
+    settings: {decay: [0, 4]}
+    rationale: "Prices stretched far above their recent mean tend to revert."
+  - id: rev_event
+    idea: reversion
+    category: pv
+    horizon: short
+    expr: "trade_when(volume > {k} * adv20, rank(-ts_delta(close, {w})), -1)"
+    slots: {k: {values: ["1", "1.5"]}, w: {windows: [2, 3, 5]}}
+    settings: {decay: [0, 3]}
+    rationale: "Only trade reversal after abnormal volume (information events); holding otherwise cuts turnover."
+  - id: rev_decayed
+    idea: reversion
+    category: pv
+    horizon: short
+    expr: "ts_decay_linear(rank(-ts_delta(close, {w})), {dk})"
+    slots: {w: {windows: [3, 5]}, dk: {windows: [3, 5, 10]}}
+    settings: {decay: [0]}
+    rationale: "Smoothed reversal keeps most of the signal while roughly halving turnover."
+  - id: rev_vol_scaled
+    idea: reversion
+    category: pv
+    horizon: short
+    expr: "rank(-ts_delta(close, {w}) / (ts_std_dev(returns, {v}) * close))"
+    slots: {w: {windows: [3, 5]}, v: {windows: [20, 60]}}
+    settings: {decay: [0, 4]}
+    rationale: "Volatility-adjusted moves: a large move for a calm stock is more likely an overreaction."
+  - id: rev_bar_shape
+    idea: reversion
+    category: pv
+    horizon: short
+    expr: "-rank(ts_mean((close - open) / (high - low + 0.001), {w}))"
+    slots: {w: {windows: [3, 5, 10]}}
+    settings: {decay: [0, 3]}
+    rationale: "Persistent strong closes within the daily range tend to revert."
+  - id: rev_gap
+    idea: reversion
+    category: pv
+    horizon: short
+    expr: "rank(-(open - ts_delay(close, 1)) / ts_delay(close, 1))"
+    slots: {}
+    settings: {decay: [0, 3, 6], neutralization: [SUBINDUSTRY, MARKET]}
+    rationale: "Overnight gaps are partly reversed as liquidity providers step in."
+  - id: rev_residual
+    idea: reversion
+    category: pv
+    horizon: short
+    expr: "-rank(ts_sum(returns - group_mean(returns, 1, {g}), {w}))"
+    slots: {g: {groups: [industry, subindustry]}, w: {windows: [3, 5, 10]}}
+    settings: {decay: [0, 4]}
+    rationale: "Idiosyncratic (peer-relative) moves revert more reliably than industry moves."
+  - id: rev_volume_confirm
+    idea: reversion
+    category: pv
+    horizon: short
+    expr: "rank(-returns * (volume / adv20))"
+    slots: {}
+    settings: {decay: [2, 4, 8]}
+    rationale: "High-volume moves revert: liquidity demand pushed prices away from fundamentals."
+  - id: rev_dist_ma
+    idea: reversion
+    category: pv
+    horizon: short
+    expr: "-rank(close / ts_mean(close, {w}) - 1)"
+    slots: {w: {windows: [5, 10, 20]}}
+    settings: {decay: [0, 4]}
+    rationale: "Distance from a short moving average mean-reverts."
+  - id: rev_rsi
+    idea: reversion
+    category: pv
+    horizon: short
+    expr: "-rank(ts_sum(max(returns, 0), {w}) / (ts_sum(abs(returns), {w}) + 0.0001))"
+    slots: {w: {windows: [5, 10, 14]}}
+    settings: {decay: [0, 4]}
+    rationale: "An RSI-like overbought measure: persistent up-days tend to be followed by weakness."
+  - id: rev_vwap_trend
+    idea: reversion
+    category: pv
+    horizon: short
+    expr: "rank(ts_mean(vwap - close, {w}) / close)"
+    slots: {w: {windows: [3, 5, 10]}}
+    settings: {decay: [0, 3]}
+    rationale: "Closing below VWAP for several days signals selling pressure that exhausts."
+
+  # ------------------------------------------------------------------ momentum
+  - id: mom_12_1
+    idea: momentum
+    category: pv
+    horizon: long
+    expr: "rank(ts_delay(ts_sum(returns, {L}), 21))"
+    slots: {L: {windows: [126, 231]}}
+    settings: {decay: [0, 5], neutralization: [SUBINDUSTRY, SECTOR, MARKET]}
+    rationale: "Medium-term winners keep outperforming (skipping the most recent month avoids short-term reversal)."
+  - id: mom_group
+    idea: momentum
+    category: pv
+    horizon: long
+    expr: "group_rank(ts_delay(ts_sum(returns, {L}), 21), {g})"
+    slots: {L: {windows: [126, 231]}, g: {groups: [industry, subindustry, sector]}}
+    settings: {decay: [0, 5]}
+    rationale: "Peer-relative momentum removes industry bets and isolates stock-specific trends."
+  - id: mom_52w_high
+    idea: momentum
+    category: pv
+    horizon: long
+    expr: "rank(close / ts_max(high, {w}))"
+    slots: {w: {windows: [126, 252]}}
+    settings: {decay: [0, 4]}
+    rationale: "Stocks near their 52-week high keep drifting up (anchoring bias)."
+  - id: mom_ir
+    idea: momentum
+    category: pv
+    horizon: long
+    expr: "rank(ts_ir(returns, {w}))"
+    slots: {w: {windows: [60, 120, 252]}}
+    settings: {decay: [0, 4]}
+    rationale: "Smooth, consistent trends (high return/volatility) persist better than jumpy ones."
+  - id: mom_industry
+    idea: momentum
+    category: pv
+    horizon: medium
+    expr: "rank(group_mean(ts_sum(returns, {w}), 1, {g}))"
+    slots: {w: {windows: [60, 126, 252]}, g: {groups: [industry, subindustry]}}
+    settings: {decay: [0, 5], neutralization: [MARKET, SECTOR]}
+    rationale: "Industry momentum: news diffuses slowly across related stocks."
+  - id: mom_residual
+    idea: momentum
+    category: pv
+    horizon: long
+    expr: "rank(ts_delay(ts_sum(returns - group_mean(returns, 1, {g}), {w}), 21))"
+    slots: {g: {groups: [industry, sector]}, w: {windows: [126, 231]}}
+    settings: {decay: [0, 5]}
+    rationale: "Residual momentum is less exposed to momentum crashes than raw momentum."
+  - id: mom_tsrank
+    idea: momentum
+    category: pv
+    horizon: medium
+    expr: "rank(ts_rank(close, {w}))"
+    slots: {w: {windows: [60, 120, 252]}}
+    settings: {decay: [0, 4]}
+    rationale: "Prices at the top of their own history tend to continue."
+  - id: mom_ma_cross
+    idea: momentum
+    category: pv
+    horizon: medium
+    expr: "{sign}rank(ts_mean(close, {s}) / ts_mean(close, {l}) - 1)"
+    slots: {sign: {values: ["", "-"]}, s: {windows: [5, 10, 20]}, l: {windows: [60, 120]}}
+    settings: {decay: [0, 4]}
+    rationale: "Moving-average crossovers capture trend direction (sign tested both ways)."
+
+  # ------------------------------------------------------------------ seasonality
+  - id: seas_1y
+    idea: seasonality
+    category: pv
+    horizon: long
+    expr: "rank(ts_delay(ts_sum(returns, 21), 231))"
+    slots: {}
+    settings: {decay: [0, 4], neutralization: [SUBINDUSTRY, MARKET]}
+    rationale: "Return seasonality: a stock's return in the same month last year predicts this month's."
+  - id: seas_multi
+    idea: seasonality
+    category: pv
+    horizon: long
+    expr: "rank(ts_delay(ts_sum(returns, 21), 231) + ts_delay(ts_sum(returns, 21), 483) + ts_delay(ts_sum(returns, 21), 735))"
+    slots: {}
+    settings: {decay: [0, 4]}
+    rationale: "Averaging the same calendar month across several years strengthens the seasonal signal."
+  - id: seas_group
+    idea: seasonality
+    category: pv
+    horizon: long
+    expr: "group_rank(ts_delay(ts_sum(returns, 21), 231), {g})"
+    slots: {g: {groups: [industry, subindustry]}}
+    settings: {decay: [0, 4]}
+    rationale: "Peer-relative seasonality removes industry-wide calendar effects."
+
+  # ------------------------------------------------------------------ value
+  - id: val_yield
+    idea: value
+    category: fundamental
+    horizon: long
+    expr: "group_rank(ts_backfill({num}, 120) / cap, {g})"
+    slots: {num: {fields: [income, operating_income, ebitda, cashflow_op, sales, equity]}, g: {groups: [industry, subindustry, sector]}}
+    settings: {decay: [0, 4]}
+    rationale: "Cheap stocks relative to earnings/cash flow/sales within their peer group outperform."
+  - id: val_ev
+    idea: value
+    category: fundamental
+    horizon: long
+    expr: "group_rank(ts_backfill({num}, 120) / enterprise_value, {g})"
+    slots: {num: {fields: [ebitda, operating_income, sales, cashflow_op]}, g: {groups: [industry, subindustry]}}
+    settings: {decay: [0, 4]}
+    rationale: "Enterprise-value multiples account for leverage when comparing valuations."
+  - id: val_ev_zscore
+    idea: value
+    category: fundamental
+    horizon: medium
+    expr: "-ts_zscore(enterprise_value / ts_backfill({num}, 120), {w})"
+    slots: {num: {fields: [ebitda, sales]}, w: {windows: [63, 126, 252]}}
+    settings: {decay: [0, 4], neutralization: [INDUSTRY, SUBINDUSTRY]}
+    rationale: "A stock trading at an unusually high multiple versus its own history tends to cheapen."
+  - id: val_tsrank
+    idea: value
+    category: fundamental
+    horizon: long
+    expr: "group_rank(ts_rank(ts_backfill({num}, 120) / cap, {w}), {g})"
+    slots: {num: {fields: [sales, income, cashflow_op]}, w: {windows: [126, 252]}, g: {groups: [subindustry, industry]}}
+    settings: {decay: [0, 4]}
+    rationale: "Value that is improving versus its own history, compared within peers."
+  - id: val_book
+    idea: value
+    category: fundamental
+    horizon: long
+    expr: "group_rank(ts_backfill(bookvalue_ps, 120) / close, {g})"
+    slots: {g: {groups: [industry, subindustry]}}
+    settings: {decay: [0, 4]}
+    rationale: "Classic book-to-price value factor."
+  - id: val_ep
+    idea: value
+    category: fundamental
+    horizon: long
+    expr: "group_rank(ts_backfill(eps, 120) / close, {g})"
+    slots: {g: {groups: [industry, subindustry, sector]}}
+    settings: {decay: [0, 4]}
+    rationale: "Earnings yield (E/P) within peers."
+  - id: val_change
+    idea: value
+    category: fundamental
+    horizon: medium
+    expr: "rank(ts_delta(ts_backfill({num}, 120) / cap, {w}))"
+    slots: {num: {fields: [income, sales, cashflow_op]}, w: {windows: [63, 126]}}
+    settings: {decay: [0, 4]}
+    rationale: "Stocks becoming cheaper because fundamentals improve faster than price."
+
+  # ------------------------------------------------------------------ quality / profitability
+  - id: q_roa
+    idea: quality
+    category: fundamental
+    horizon: long
+    expr: "group_rank(ts_backfill({num}, 120) / ts_backfill(assets, 120), {g})"
+    slots: {num: {fields: [operating_income, income, cashflow_op]}, g: {groups: [industry, subindustry, sector]}}
+    settings: {decay: [0, 4]}
+    rationale: "Profitable firms (high return on assets) outperform less profitable peers."
+  - id: q_gross_profit
+    idea: quality
+    category: fundamental
+    horizon: long
+    expr: "group_rank((ts_backfill(sales, 120) - ts_backfill(cogs, 120)) / ts_backfill(assets, 120), {g})"
+    slots: {g: {groups: [industry, subindustry]}}
+    settings: {decay: [0, 4]}
+    rationale: "Gross profitability (Novy-Marx) is a robust quality signal."
+  - id: q_roe
+    idea: quality
+    category: fundamental
+    horizon: long
+    expr: "group_rank(ts_backfill(return_equity, 120), {g})"
+    slots: {g: {groups: [industry, subindustry]}}
+    settings: {decay: [0, 4]}
+    rationale: "High return on equity signals durable competitive advantage."
+  - id: q_margin
+    idea: quality
+    category: fundamental
+    horizon: long
+    expr: "group_rank(ts_backfill(operating_income, 120) / ts_backfill(sales, 120), {g})"
+    slots: {g: {groups: [industry, subindustry]}}
+    settings: {decay: [0, 4]}
+    rationale: "Higher operating margins than peers indicate pricing power."
+  - id: q_cash_rich
+    idea: quality
+    category: fundamental
+    horizon: long
+    expr: "group_rank(ts_backfill(cash, 120) / ts_backfill(assets, 120), {g})"
+    slots: {g: {groups: [industry, sector]}}
+    settings: {decay: [0, 4]}
+    rationale: "Cash-rich balance sheets are more resilient."
+  - id: q_earnings_stability
+    idea: quality
+    category: fundamental
+    horizon: long
+    expr: "-rank(ts_std_dev(ts_backfill(income, 120) / ts_backfill(assets, 120), {w}))"
+    slots: {w: {windows: [252, 504]}}
+    settings: {decay: [0, 4]}
+    rationale: "Stable profitability is rewarded; volatile earnings carry risk."
+  - id: q_cfo_quality
+    idea: quality
+    category: fundamental
+    horizon: long
+    expr: "group_rank(ts_backfill(cashflow_op, 120) / (abs(ts_backfill(income, 120)) + 0.01 * ts_backfill(assets, 120)), {g})"
+    slots: {g: {groups: [industry, subindustry]}}
+    settings: {decay: [0, 4]}
+    rationale: "Earnings backed by operating cash flow are higher quality."
+
+  # ------------------------------------------------------------------ growth
+  - id: g_zscore
+    idea: growth
+    category: fundamental
+    horizon: long
+    expr: "ts_zscore(ts_backfill({num}, 120), {w})"
+    slots: {num: {fields: [sales, income, operating_income, cashflow_op]}, w: {windows: [126, 252]}}
+    settings: {decay: [0, 4], neutralization: [INDUSTRY, SUBINDUSTRY]}
+    rationale: "Fundamentals rising versus their own history (improving business) are under-reacted to."
+  - id: g_yoy
+    idea: growth
+    category: fundamental
+    horizon: long
+    expr: "group_rank(ts_delta(ts_backfill({num}, 120), 252) / ts_backfill(assets, 120), {g})"
+    slots: {num: {fields: [operating_income, sales, income]}, g: {groups: [industry, subindustry]}}
+    settings: {decay: [0, 4]}
+    rationale: "Year-over-year fundamental improvement scaled by size."
+  - id: g_accel
+    idea: growth
+    category: fundamental
+    horizon: medium
+    expr: "rank(ts_delta(ts_backfill({num}, 120), 63) / abs(ts_delay(ts_backfill({num}, 120), 63)))"
+    slots: {num: {fields: [sales, income, operating_income]}}
+    settings: {decay: [0, 4], neutralization: [INDUSTRY, SUBINDUSTRY]}
+    rationale: "Quarter-over-quarter acceleration of fundamentals."
+  - id: g_eps_change
+    idea: growth
+    category: fundamental
+    horizon: medium
+    expr: "group_rank(ts_delta(ts_backfill(eps, 120), {w}) / close, {g})"
+    slots: {w: {windows: [63, 252]}, g: {groups: [industry, subindustry]}}
+    settings: {decay: [0, 4]}
+    rationale: "Earnings changes scaled by price approximate an earnings-surprise signal."
+
+  # ------------------------------------------------------------------ accruals / investment
+  - id: acc_total
+    idea: accruals
+    category: fundamental
+    horizon: long
+    expr: "-group_rank((ts_backfill(operating_income, 120) - ts_backfill(cashflow_op, 120)) / ts_backfill(assets, 120), {g})"
+    slots: {g: {groups: [industry, subindustry]}}
+    settings: {decay: [0, 4]}
+    rationale: "Accruals anomaly: earnings not backed by cash flow tend to disappoint."
+  - id: inv_asset_growth
+    idea: investment
+    category: fundamental
+    horizon: long
+    expr: "-rank(ts_delta(ts_backfill(assets, 120), 252) / ts_delay(ts_backfill(assets, 120), 252))"
+    slots: {}
+    settings: {decay: [0, 4], neutralization: [INDUSTRY, SUBINDUSTRY]}
+    rationale: "Asset-growth anomaly: firms growing their balance sheet fast subsequently underperform."
+  - id: inv_capex
+    idea: investment
+    category: fundamental
+    horizon: long
+    expr: "-group_rank(ts_backfill(capex, 120) / ts_backfill(assets, 120), {g})"
+    slots: {g: {groups: [industry, subindustry]}}
+    settings: {decay: [0, 4]}
+    rationale: "Aggressive capital spending predicts lower future returns."
+  - id: acc_working_capital
+    idea: accruals
+    category: fundamental
+    horizon: long
+    expr: "-rank(ts_delta(ts_backfill(assets_curr, 120) - ts_backfill(liabilities_curr, 120), 252) / ts_backfill(assets, 120))"
+    slots: {}
+    settings: {decay: [0, 4], neutralization: [INDUSTRY, SUBINDUSTRY]}
+    rationale: "Working-capital build-up is a form of accruals that reverses."
+
+  # ------------------------------------------------------------------ leverage
+  - id: lev_debt_assets
+    idea: leverage
+    category: fundamental
+    horizon: long
+    expr: "-group_rank(ts_backfill(debt, 120) / ts_backfill(assets, 120), {g})"
+    slots: {g: {groups: [industry, subindustry]}}
+    settings: {decay: [0, 4]}
+    rationale: "Highly levered firms within an industry carry distress risk that is under-priced."
+  - id: lev_change
+    idea: leverage
+    category: fundamental
+    horizon: long
+    expr: "-rank(ts_delta(ts_backfill(liabilities, 120) / ts_backfill(assets, 120), 252))"
+    slots: {}
+    settings: {decay: [0, 4], neutralization: [INDUSTRY, SUBINDUSTRY]}
+    rationale: "Deleveraging firms outperform those adding leverage."
+  - id: lev_equity_ratio
+    idea: leverage
+    category: fundamental
+    horizon: long
+    expr: "group_rank(ts_backfill(equity, 120) / ts_backfill(assets, 120), {g})"
+    slots: {g: {groups: [industry, sector]}}
+    settings: {decay: [0, 4]}
+    rationale: "Conservatively financed firms."
+
+  # ------------------------------------------------------------------ liquidity / volume
+  - id: liq_amihud
+    idea: liquidity
+    category: pv
+    horizon: medium
+    expr: "group_neutralize(rank(ts_mean(abs(returns) / (volume * close), {w})), bucket(rank(cap), range=\"0.1,1,0.1\"))"
+    slots: {w: {windows: [20, 60]}}
+    settings: {decay: [0, 4], neutralization: [MARKET, SUBINDUSTRY]}
+    rationale: "Illiquidity premium, neutralized within size buckets so it is not just a small-cap bet."
+  - id: liq_pv_corr
+    idea: pv_divergence
+    category: pv
+    horizon: short
+    expr: "-ts_corr(rank(close), rank(volume), {w})"
+    slots: {w: {windows: [5, 10, 20]}}
+    settings: {decay: [0, 4]}
+    rationale: "Price moves not confirmed by volume (or volume-driven price pressure) revert."
+  - id: liq_share_turnover
+    idea: liquidity
+    category: pv
+    horizon: medium
+    expr: "-rank(ts_mean(volume, {w}) / sharesout)"
+    slots: {w: {windows: [20, 60]}}
+    settings: {decay: [0, 4]}
+    rationale: "Heavily traded (attention-grabbing) stocks tend to underperform."
+  - id: liq_volume_trend
+    idea: liquidity
+    category: pv
+    horizon: short
+    expr: "-rank(ts_delta(ts_mean(volume, 5), {w}) / adv20)"
+    slots: {w: {windows: [5, 20]}}
+    settings: {decay: [0, 4]}
+    rationale: "Surging trading activity precedes short-term weakness."
+  - id: liq_pv_cov
+    idea: pv_divergence
+    category: pv
+    horizon: short
+    expr: "-rank(ts_covariance(rank(close), rank(volume), {w}))"
+    slots: {w: {windows: [5, 10]}}
+    settings: {decay: [0, 4]}
+    rationale: "Co-movement of price and volume ranks (101-alphas style) reverts."
+  - id: liq_volume_z
+    idea: liquidity
+    category: pv
+    horizon: short
+    expr: "rank(-ts_zscore(volume, {w}))"
+    slots: {w: {windows: [20, 60]}}
+    settings: {decay: [0, 4]}
+    rationale: "Abnormally high volume relative to history precedes weak returns."
+
+  # ------------------------------------------------------------------ volatility / risk
+  - id: vol_low
+    idea: volatility
+    category: pv
+    horizon: medium
+    expr: "-rank(ts_std_dev(returns, {w}))"
+    slots: {w: {windows: [20, 60, 120]}}
+    settings: {decay: [0, 4], neutralization: [SUBINDUSTRY, INDUSTRY, SECTOR]}
+    rationale: "Low-volatility anomaly: calmer stocks deliver better risk-adjusted returns."
+  - id: vol_low_group
+    idea: volatility
+    category: pv
+    horizon: medium
+    expr: "-group_rank(ts_std_dev(returns, {w}), {g})"
+    slots: {w: {windows: [20, 60]}, g: {groups: [industry, subindustry]}}
+    settings: {decay: [0, 4]}
+    rationale: "Peer-relative low volatility."
+  - id: vol_range
+    idea: volatility
+    category: pv
+    horizon: medium
+    expr: "-rank(ts_mean((high - low) / close, {w}))"
+    slots: {w: {windows: [10, 20, 60]}}
+    settings: {decay: [0, 4]}
+    rationale: "Range-based volatility is a less noisy low-risk signal."
+  - id: vol_max_effect
+    idea: volatility
+    category: pv
+    horizon: short
+    expr: "-rank(ts_max(returns, {w}))"
+    slots: {w: {windows: [5, 21]}}
+    settings: {decay: [0, 4]}
+    rationale: "Lottery-like stocks (large recent maximum return) are overpriced."
+  - id: vol_skew
+    idea: volatility
+    category: pv
+    horizon: medium
+    expr: "-rank(ts_skewness(returns, {w}))"
+    slots: {w: {windows: [60, 120]}}
+    settings: {decay: [0, 4]}
+    rationale: "Positively skewed stocks are overpriced (preference for lottery payoffs)."
+  - id: vol_idio
+    idea: volatility
+    category: pv
+    horizon: medium
+    expr: "-rank(ts_std_dev(returns - group_mean(returns, 1, {g}), {w}))"
+    slots: {g: {groups: [industry, subindustry]}, w: {windows: [20, 60]}}
+    settings: {decay: [0, 4]}
+    rationale: "Idiosyncratic-volatility puzzle: high idio-vol stocks underperform."
+  - id: vol_beta
+    idea: volatility
+    category: pv
+    horizon: long
+    expr: "-rank(ts_regression(returns, group_mean(returns, 1, market), {w}, rettype=2))"
+    slots: {w: {windows: [60, 120, 252]}}
+    settings: {decay: [0, 4]}
+    rationale: "Betting-against-beta: low-beta stocks earn higher risk-adjusted returns."
+  - id: vol_kurtosis
+    idea: volatility
+    category: pv
+    horizon: medium
+    expr: "-rank(ts_kurtosis(returns, {w}))"
+    slots: {w: {windows: [60, 120]}}
+    settings: {decay: [0, 4]}
+    rationale: "Fat-tailed return distributions are penalized."
+
+  # ------------------------------------------------------------------ technical / price-volume divergence
+  - id: tech_range_position
+    idea: pv_divergence
+    category: pv
+    horizon: short
+    expr: "{sign}rank((close - ts_min(low, {w})) / (ts_max(high, {w}) - ts_min(low, {w}) + 0.001))"
+    slots: {sign: {values: ["", "-"]}, w: {windows: [10, 20, 60]}}
+    settings: {decay: [0, 4]}
+    rationale: "Position within the recent trading range (tested as both continuation and reversal)."
+  - id: tech_argmax
+    idea: pv_divergence
+    category: pv
+    horizon: short
+    expr: "{sign}rank(ts_arg_max(close, {w}))"
+    slots: {sign: {values: ["", "-"]}, w: {windows: [5, 10, 20]}}
+    settings: {decay: [0, 4]}
+    rationale: "Time since the recent high captures exhaustion of short-term trends."
+  - id: tech_high_volume_corr
+    idea: pv_divergence
+    category: pv
+    horizon: short
+    expr: "-rank(ts_corr(high, rank(volume), {w}))"
+    slots: {w: {windows: [5, 10]}}
+    settings: {decay: [0, 4]}
+    rationale: "Highs set on rising volume tend to reverse (101-alphas #44 family)."
+  - id: tech_median_ret
+    idea: reversion
+    category: pv
+    horizon: short
+    expr: "-rank(ts_median(returns, {w}))"
+    slots: {w: {windows: [5, 10, 20]}}
+    settings: {decay: [0, 4]}
+    rationale: "Robust (median) recent return reversal, less sensitive to single jumps."
+
+  # ------------------------------------------------------------------ combinations (multi-factor)
+  - id: combo_value_reversal
+    idea: value
+    category: fundamental
+    horizon: medium
+    expr: "rank(group_rank(ts_backfill({num}, 120) / cap, {g})) + rank(-ts_delta(close, 5))"
+    slots: {num: {fields: [income, cashflow_op, sales]}, g: {groups: [industry, subindustry]}}
+    settings: {decay: [0, 4]}
+    rationale: "Cheap stocks that just sold off: value entry timed by short-term reversal."
+  - id: combo_quality_lowvol
+    idea: quality
+    category: fundamental
+    horizon: long
+    expr: "rank(ts_backfill(operating_income, 120) / ts_backfill(assets, 120)) - rank(ts_std_dev(returns, 60))"
+    slots: {}
+    settings: {decay: [0, 4], neutralization: [INDUSTRY, SUBINDUSTRY]}
+    rationale: "Defensive quality: profitable and calm stocks."
+  - id: combo_momentum_value
+    idea: momentum
+    category: pv
+    horizon: long
+    expr: "rank(ts_delay(ts_sum(returns, 231), 21)) + rank(ts_backfill({num}, 120) / cap)"
+    slots: {num: {fields: [income, sales]}}
+    settings: {decay: [0, 4], neutralization: [SUBINDUSTRY, INDUSTRY]}
+    rationale: "Value and momentum are negatively correlated; combining them diversifies."
+  - id: combo_regime_switch
+    idea: reversion
+    category: pv
+    horizon: short
+    expr: "volume > adv20 ? rank(-ts_delta(close, {w})) : rank(ts_backfill({num}, 120) / cap)"
+    slots: {w: {windows: [3, 5]}, num: {fields: [income, cashflow_op]}}
+    settings: {decay: [2, 4]}
+    rationale: "Trade reversal on high-volume days, fall back to value otherwise."
+
+  # ------------------------------------------------------------------ BRAIN-only data (cannot be simulated locally)
+  - id: brain_news_regime
+    idea: sentiment
+    category: news
+    horizon: short
+    expr: "avg_news = vec_avg(nws12_afterhsz_sl); rank(ts_sum(avg_news, {w})) > 0.5 ? 1 : rank(-ts_delta(close, 2))"
+    slots: {w: {windows: [20, 60]}}
+    settings: {decay: [0, 4], neutralization: [SUBINDUSTRY]}
+    rationale: "Hot-news regime switch combined with reversion (community IQC example)."
+  - id: brain_social_buzz
+    idea: sentiment
+    category: social
+    horizon: medium
+    expr: "buzz = ts_backfill(-vec_sum(scl12_alltype_buzzvec), 20); ts_av_diff(buzz, {w})"
+    slots: {w: {windows: [20, 60, 120]}}
+    settings: {decay: [0, 4], neutralization: [SUBINDUSTRY]}
+    rationale: "Too much social-media buzz is followed by underperformance."
+  - id: brain_opt_skew
+    idea: options
+    category: option
+    horizon: short
+    expr: "{sign}rank(implied_volatility_call_120 - implied_volatility_put_120)"
+    slots: {sign: {values: ["", "-"]}}
+    settings: {decay: [0, 4], neutralization: [SUBINDUSTRY, INDUSTRY]}
+    rationale: "Call-put implied volatility spread reflects informed option demand."
+  - id: brain_opt_iv_rv
+    idea: options
+    category: option
+    horizon: medium
+    expr: "{sign}rank(implied_volatility_call_120 / parkinson_volatility_120)"
+    slots: {sign: {values: ["", "-"]}}
+    settings: {decay: [0, 4], neutralization: [SUBINDUSTRY]}
+    rationale: "Implied versus realized volatility: expensive options precede weak returns."
+  - id: brain_opt_iv_change
+    idea: options
+    category: option
+    horizon: short
+    expr: "-rank(ts_delta(implied_volatility_call_120, {w}))"
+    slots: {w: {windows: [5, 20]}}
+    settings: {decay: [0, 4]}
+    rationale: "Rising implied volatility signals informed demand for protection."

@@ -1,0 +1,26 @@
+# BRAIN-style submission checks used by Alpha Foundry's local proxy simulator.
+# Values marked "verify" could not be confirmed against official BRAIN documentation;
+# adjust them here (or on the Settings page, which writes runtime/checks_user.yaml).
+
+delay1:
+  sharpe_min: 1.25
+  fitness_min: 1.0
+delay0:
+  sharpe_min: 2.0        # verify
+  fitness_min: 1.3       # verify
+
+turnover_min: 0.01       # 1%
+turnover_max: 0.70       # 70%
+max_weight: 0.10         # CONCENTRATED_WEIGHT: largest single-stock weight
+sub_universe_factor: 0.75  # verify: sub Sharpe >= factor * sqrt(sub/univ) * Sharpe
+self_corr_max: 0.70
+self_corr_sharpe_improvement: 0.10   # correlated alpha allowed if Sharpe is >= 10% higher
+self_corr_years: 4       # PnL window (most recent IS years) used for correlation
+two_year_sharpe_min: 1.0 # verify: soft check on the most recent 2 IS years
+
+# Alpha Foundry robustness gates (not BRAIN checks; reported as warnings)
+local_gates:
+  os_is_ratio_min: 0.5         # OS Sharpe / IS Sharpe
+  positive_years_min: 0.7      # share of IS years with positive PnL
+  stability_min: 0.7           # Sharpe retained when windows are perturbed +/-25%
+  drawdown_max: 0.5            # max drawdown (fraction of half book)

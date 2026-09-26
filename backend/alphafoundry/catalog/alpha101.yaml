@@ -1,0 +1,38 @@
+# Price-volume alphas from Kakushadze, "101 Formulaic Alphas" (2015, arXiv:1601.00991),
+# translated to BRAIN Fast Expression syntax. Translations were written from the paper's
+# formulas and could not be machine-verified against the PDF: VERIFY against the paper before
+# relying on them. Division-prone formulas are wrapped in rank() to keep weights bounded.
+# Mapping: correlation->ts_corr, delta->ts_delta, delay->ts_delay, decay_linear->ts_decay_linear,
+# SignedPower->signed_power, Ts_Rank->ts_rank, sum/stddev/product->ts_*, adv{d}->adv20 / ts_mean(volume, d).
+
+alphas:
+  - {id: A001, expr: "rank(ts_arg_max(signed_power(if_else(returns < 0, ts_std_dev(returns, 20), close), 2), 5)) - 0.5"}
+  - {id: A002, expr: "-ts_corr(rank(ts_delta(log(volume), 2)), rank((close - open) / open), 6)"}
+  - {id: A003, expr: "-ts_corr(rank(open), rank(volume), 10)"}
+  - {id: A004, expr: "-ts_rank(rank(low), 9)"}
+  - {id: A005, expr: "rank(open - ts_mean(vwap, 10)) * -abs(rank(close - vwap))"}
+  - {id: A006, expr: "-ts_corr(open, volume, 10)"}
+  - {id: A007, expr: "if_else(adv20 < volume, -ts_rank(abs(ts_delta(close, 7)), 60) * sign(ts_delta(close, 7)), -1)"}
+  - {id: A008, expr: "-rank(ts_sum(open, 5) * ts_sum(returns, 5) - ts_delay(ts_sum(open, 5) * ts_sum(returns, 5), 10))"}
+  - {id: A009, expr: "d = ts_delta(close, 1); if_else(ts_min(d, 5) > 0, d, if_else(ts_max(d, 5) < 0, d, -d))"}
+  - {id: A012, expr: "sign(ts_delta(volume, 1)) * -ts_delta(close, 1)"}
+  - {id: A013, expr: "-rank(ts_covariance(rank(close), rank(volume), 5))"}
+  - {id: A017, expr: "-rank(ts_rank(close, 10)) * rank(ts_delta(ts_delta(close, 1), 1)) * rank(ts_rank(volume / adv20, 5))"}
+  - {id: A018, expr: "-rank(ts_std_dev(abs(close - open), 5) + (close - open) + ts_corr(close, open, 10))"}
+  - {id: A019, expr: "-sign(close - ts_delay(close, 7) + ts_delta(close, 7)) * (1 + rank(1 + ts_sum(returns, 250)))"}
+  - {id: A020, expr: "-rank(open - ts_delay(high, 1)) * rank(open - ts_delay(close, 1)) * rank(open - ts_delay(low, 1))"}
+  - {id: A023, expr: "if_else(ts_mean(high, 20) < high, -ts_delta(high, 2), 0)"}
+  - {id: A025, expr: "rank(-returns * adv20 * vwap * (high - close))"}
+  - {id: A028, expr: "scale(ts_corr(adv20, low, 5) + (high + low) / 2 - close)"}
+  - {id: A033, expr: "rank(open / close - 1)"}
+  - {id: A034, expr: "rank(1 - rank(ts_std_dev(returns, 2) / ts_std_dev(returns, 5)) + 1 - rank(ts_delta(close, 1)))"}
+  - {id: A035, expr: "ts_rank(volume, 32) * (1 - ts_rank(close + high - low, 16)) * (1 - ts_rank(returns, 32))"}
+  - {id: A038, expr: "-rank(ts_rank(close, 10)) * rank(close / open)"}
+  - {id: A041, expr: "rank(signed_power(high * low, 0.5) - vwap)"}
+  - {id: A042, expr: "rank(vwap - close) / rank(vwap + close)"}
+  - {id: A043, expr: "ts_rank(volume / adv20, 20) * ts_rank(-ts_delta(close, 7), 8)"}
+  - {id: A044, expr: "-ts_corr(high, rank(volume), 5)"}
+  - {id: A053, expr: "-rank(ts_delta(((close - low) - (high - close)) / (close - low + 0.001), 9))"}
+  - {id: A054, expr: "-rank((low - close) * signed_power(open, 5) / ((low - high - 0.001) * signed_power(close, 5)))"}
+  - {id: A055, expr: "-ts_corr(rank((close - ts_min(low, 12)) / (ts_max(high, 12) - ts_min(low, 12) + 0.001)), rank(volume), 6)"}
+  - {id: A101, expr: "(close - open) / (high - low + 0.001)"}

@@ -1,0 +1,35 @@
+# runtime state (data panels, database, caches, logs)
+runtime/
+
+# Python
+backend/.venv/
+__pycache__/
+*.pyc
+*.nbi
+*.nbc
+.pytest_cache/
+*.egg-info/
+
+# Node / UI build
+frontend/node_modules/
+frontend/dist/
+
+# tooling
+.playwright-mcp/
+.vscode/
+.idea/
+
+# secrets / local env
+.env
+.env.*
+!.env.example
+
+# logs & coverage
+*.log
+.coverage
+htmlcov/
+
+# OS / OneDrive
+desktop.ini
+Thumbs.db
+.DS_Store
