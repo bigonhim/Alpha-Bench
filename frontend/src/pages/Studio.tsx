@@ -1,6 +1,6 @@
 import * as Popover from "@radix-ui/react-popover";
 import { useQueryClient } from "@tanstack/react-query";
-import { Braces, Clipboard, Grid3x3, History, Play, Save, Stethoscope, Wand2, X } from "lucide-react";
+import { Braces, Clipboard, CloudUpload, Grid3x3, History, Play, Save, Stethoscope, Wand2, X } from "lucide-react";
 import { useCallback, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
@@ -15,6 +15,7 @@ import {
   CorrelationCard,
   DescriptionCard,
   MetricStrip,
+  QualityCard,
   RobustnessCard,
 } from "../components/ResultView";
 import { SettingsBar } from "../components/SettingsBar";
@@ -259,7 +260,7 @@ export default function Studio() {
         setExtrasLoading(true);
         const ex = await api.extras(text, settings);
         if (id !== runId.current) return;
-        if (ex.ok) setResult((prev) => (prev ? { ...prev, extras: ex.extras, checks: ex.checks, pass_prob: ex.pass_prob } : prev));
+        if (ex.ok) setResult((prev) => (prev ? { ...prev, extras: ex.extras, checks: ex.checks, pass_prob: ex.pass_prob, quality: ex.quality ?? prev.quality } : prev));
       } catch (e) {
         toast.error(String((e as Error).message || e));
       } finally {
@@ -388,6 +389,28 @@ export default function Studio() {
               <Braces size={13} /> BRAIN JSON
             </button>
           </Tip>
+          <Tip content="Simulate this alpha on BRAIN itself (needs the BRAIN connection) and store the real results">
+            <button
+              className="btn btn-ghost"
+              disabled={hasErr}
+              onClick={async () => {
+                try {
+                  const st = await api.brain.status();
+                  if (!st.connected) {
+                    toast.error("Not connected to BRAIN. Sign in on the BRAIN page first.");
+                    nav("/brain");
+                    return;
+                  }
+                  const r = await api.brain.simulate({ exprs: [studioText.trim()], settings: studioSettings });
+                  toast.success(`Sent to BRAIN (job #${r.id}); results appear in the Library`);
+                } catch (e) {
+                  toast.error(String((e as Error).message));
+                }
+              }}
+            >
+              <CloudUpload size={13} /> Run on BRAIN
+            </button>
+          </Tip>
           <Popover.Root>
             <Popover.Trigger asChild>
               <button className="btn btn-ghost">
@@ -483,6 +506,7 @@ export default function Studio() {
             <DescriptionCard r={result} />
           </div>
           <div className="flex flex-col gap-3 xl:col-span-4">
+            <QualityCard r={result} loading={extrasLoading} />
             <ChecksList r={result} loading={extrasLoading} />
             <RobustnessCard r={result} loading={extrasLoading} />
             <CorrelationCard r={result} onOpen={(id) => nav(`/library?open=${id}`)} />

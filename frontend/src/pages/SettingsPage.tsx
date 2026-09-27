@@ -26,7 +26,7 @@ export default function SettingsPage() {
   useEffect(() => setS(settings ? { ...settings } : null), [settings]);
   if (!c || !s) return <div className="p-4"><Spinner /></div>;
 
-  const upd = (path: string[], v: number) =>
+  const upd = (path: string[], v: number | number[]) =>
     setC((prev: any) => {
       const n = structuredClone(prev);
       let o = n;
@@ -81,6 +81,21 @@ export default function SettingsPage() {
           <NumIn label="Stability ≥" value={c.local_gates.stability_min} onChange={(v) => upd(["local_gates", "stability_min"], v)} />
           <NumIn label="Drawdown ≤" value={c.local_gates.drawdown_max} onChange={(v) => upd(["local_gates", "drawdown_max"], v)} />
         </div>
+        {c.quality && (
+          <>
+            <div className="lbl mb-1 mt-3">Quality grade A (BRAIN-ready): margins over BRAIN's thresholds and robustness evidence</div>
+            <div className="flex flex-wrap gap-3">
+              <NumIn label="Sharpe margin ×" value={c.quality.sharpe_margin} onChange={(v) => upd(["quality", "sharpe_margin"], v)} />
+              <NumIn label="Fitness margin ×" value={c.quality.fitness_margin} onChange={(v) => upd(["quality", "fitness_margin"], v)} />
+              <NumIn label="Turnover band low" value={c.quality.turnover_band[0]} onChange={(v) => upd(["quality", "turnover_band"], [v, c.quality.turnover_band[1]])} />
+              <NumIn label="Turnover band high" value={c.quality.turnover_band[1]} onChange={(v) => upd(["quality", "turnover_band"], [c.quality.turnover_band[0], v])} />
+              <NumIn label="Holdout Sharpe ≥" value={c.quality.os_sharpe_min} onChange={(v) => upd(["quality", "os_sharpe_min"], v)} />
+              <NumIn label="Holdout / IS ≥" value={c.quality.os_ratio_min} onChange={(v) => upd(["quality", "os_ratio_min"], v)} />
+              <NumIn label="Stability ≥" value={c.quality.stability_min} onChange={(v) => upd(["quality", "stability_min"], v)} />
+              <NumIn label="Max nodes" value={c.quality.max_complexity} step={1} onChange={(v) => upd(["quality", "max_complexity"], v)} />
+            </div>
+          </>
+        )}
       </Card>
       <div className="flex flex-col gap-3">
         <Card title="Simulation" actions={<button className="btn btn-primary" onClick={saveSettings} disabled={busy}><Save size={13} /> Save</button>}>

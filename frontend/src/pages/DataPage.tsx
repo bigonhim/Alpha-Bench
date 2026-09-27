@@ -12,6 +12,7 @@ export default function DataPage() {
   const { data: cov, isFetching } = useQuery({ queryKey: ["coverage", status?.data?.version], queryFn: api.coverage });
   const [email, setEmail] = useState("");
   const [maxTickers, setMaxTickers] = useState<string>("");
+  const [pool, setPool] = useState<string>("broad");
   const qc = useQueryClient();
   const jobs = useJobs((s) => s.jobs);
   const buildJob = useMemo(() => Object.values(jobs).filter((j) => j.kind === "data_build" || j.kind === "demo_build").sort((a, b) => b.id - a.id)[0], [jobs]);
@@ -20,6 +21,9 @@ export default function DataPage() {
   useEffect(() => {
     if (status?.settings?.sec_contact_email !== undefined) setEmail(status.settings.sec_contact_email || "");
   }, [status?.settings?.sec_contact_email]);
+  useEffect(() => {
+    if (status?.settings?.universe_pool) setPool(status.settings.universe_pool);
+  }, [status?.settings?.universe_pool]);
 
   const saveSettings = async (u: Record<string, unknown>) => {
     try {
@@ -36,8 +40,8 @@ export default function DataPage() {
       toast.error("Enter a contact email first (SEC EDGAR and Wikipedia require one for automated downloads).");
       return;
     }
-    await api.saveSettings({ sec_contact_email: email });
-    const r = await api.buildData(maxTickers ? { max_tickers: Number(maxTickers) } : {});
+    await api.saveSettings({ sec_contact_email: email, universe_pool: pool });
+    const r = await api.buildData({ pool, ...(maxTickers ? { max_tickers: Number(maxTickers) } : {}) });
     toast.success(`Data build started (job #${r.id})`);
   };
 
@@ -49,7 +53,9 @@ export default function DataPage() {
         <Card title={<span className="flex items-center gap-1.5"><Database size={13} /> Active dataset</span>}>
           {d ? (
             <>
-              <Kv k="Source" v={d.source === "real" ? "Real (Yahoo + SEC EDGAR)" : "Synthetic demo"} />
+              <Kv k="Source" v={d.source === "real" ? "Real (Yahoo + SEC EDGAR)" : "Synthetic demo (mining disabled)"} />
+              {d.source === "real" && <Kv k="Pool" v={d.pool === "broad" ? `Broad US (TOP3000-like)` : "S&P 1500"} />}
+              {d.classification && <Kv k="Classification" v={d.classification} />}
               <Kv k="Dates" v={`${d.start} → ${d.end}`} />
               <Kv k="Instruments × days" v={`${d.N.toLocaleString()} × ${d.T.toLocaleString()}`} />
               <Kv k="Fields" v={d.fields.length} />
@@ -77,7 +83,23 @@ export default function DataPage() {
         </Card>
         <Card title={<span className="flex items-center gap-1.5"><DownloadCloud size={13} /> Build / update real data</span>}>
           <div className="text-[12px] text-ink2">
-            Downloads current S&amp;P 500/400/600 constituents with GICS classes (Wikipedia), daily prices (Yahoo Finance), and point-in-time fundamentals (SEC EDGAR XBRL: first-filed values, usable the day after filing). The first build takes about 10–20 minutes; updates are incremental.
+            Downloads daily prices (Yahoo Finance) and point-in-time fundamentals (SEC EDGAR XBRL: first-filed values, usable the day after filing) for the chosen pool. Updates are incremental.
+          </div>
+          <div className="mt-2 flex flex-col gap-1.5">
+            <label className="lbl">Stock pool</label>
+            <Select
+              value={pool}
+              onChange={setPool}
+              options={[
+                { value: "broad", label: "Broad US: ~3,400 liquid stocks, universes up to TOP3000 (closest to BRAIN)" },
+                { value: "sp1500", label: "S&P 1500 only: faster, universes up to TOP1500" },
+              ]}
+            />
+            <div className="text-[11.5px] text-muted">
+              {pool === "broad"
+                ? "Every listed US common stock from SEC's exchange list, kept when it ranks among the ~3,450 most liquid at any month end. Names outside the S&P 1500 get GICS-like groups from a SIC crosswalk learned on the S&P names. First build: about 40-70 minutes and 2-3 GB of disk (pause OneDrive sync while it runs). Simulations are about twice as slow as with the S&P 1500."
+                : "Current S&P 500/400/600 constituents with GICS classes (Wikipedia). First build: about 10-20 minutes, about 1 GB of disk. BRAIN TOP3000 is simulated on local TOP1500, which misses BRAIN's smaller names."}
+            </div>
           </div>
           <div className="mt-2 flex flex-col gap-2">
             <label className="lbl">Contact email: included in the User-Agent of SEC EDGAR and Wikipedia requests only, as their access policies require</label>

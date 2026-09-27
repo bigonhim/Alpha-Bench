@@ -42,7 +42,14 @@ def field_map() -> dict[str, dict]:
                 if not fid:
                     continue
                 base = m.get(fid, {})
-                merged = {**base, **f, "source": "user" if not base else base.get("source", "seed")}
+                if base:
+                    # a seed field keeps its local definition; BRAIN adds usage statistics and confirms the id
+                    merged = {**f, **base, "verified": True, "on_brain": True}
+                    for k in ("coverage", "alpha_count", "user_count", "dataset_name", "subcategory"):
+                        if f.get(k) is not None:
+                            merged[k] = f[k]
+                else:
+                    merged = {**f, "source": "user"}
                 merged.setdefault("local", base.get("local", False))
                 merged.setdefault("type", "MATRIX")
                 merged.setdefault("category", "other")
@@ -80,6 +87,10 @@ def import_user_fields(rows: list[dict[str, Any]]) -> int:
             "verified": True,
             "coverage": r.get("coverage"),
         }
+        for k in ("dataset_name", "subcategory", "alpha_count", "user_count", "region", "delay", "universe",
+                  "source_brain"):
+            if r.get(k) is not None:
+                existing[fid][k] = r[k]
         n += 1
     atomic_write_text(USER_FIELDS_PATH, json.dumps({"fields": list(existing.values())}, indent=1))
     invalidate_fields()

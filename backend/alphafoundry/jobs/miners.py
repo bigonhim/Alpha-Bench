@@ -17,6 +17,7 @@ from ..gen.grammar import Grammar, GrammarConfig, is_degenerate
 from ..gen.templates import Candidate, alpha101_candidates, expand, load_templates, settings_grid, template_candidates
 from ..sim.checks import FAIL, HARD_CHECKS, run_checks
 from ..sim.correlation import CorrelationIndex
+from ..sim.quality import assess, grade_at_least, quick_grade, quick_score
 from ..sim.simulator import SimSettings
 from .manager import JobHandle, JobManager
 
@@ -74,9 +75,20 @@ def score_result(ws, res: dict) -> tuple[dict, float, int]:
     return checks, ws.cal.predict(feats, failed_hard), failed_hard
 
 
+def quality_of(ws, res: dict, checks: dict) -> dict:
+    """Grade (A-D) and quality score of a full evaluation."""
+    m_is = (res.get("metrics") or {}).get("is") or {}
+    s = SimSettings.from_dict(res["settings"])
+    return assess(res.get("metrics") or {}, checks, ws.checks_cfg, delay=s.delay, extras=res.get("extras"),
+                  yearly=res.get("yearly"), complexity=res.get("size"),
+                  expected_brain_sharpe=ws.cal.trusted_brain_sharpe(m_is.get("sharpe") or 0.0))
+
+
 def persist(h: JobHandle, ws, cand: Candidate, res: dict, job_index: CorrelationIndex | None = None,
-            corr_cap: float | None = None, tags: list[str] | None = None) -> dict | None:
-    """Turn a full evaluation into checks + a saved alpha. Returns a summary row or None if rejected."""
+            corr_cap: float | None = None, tags: list[str] | None = None, min_grade: str | None = None) -> dict | None:
+    """Turn a full evaluation into checks + a saved alpha. Returns a summary row or None if rejected.
+
+    ``min_grade`` drops alphas below that quality grade (A best ... D) instead of saving them."""
     if not res.get("ok"):
         return None
     metrics = res["metrics"]
@@ -91,6 +103,10 @@ def persist(h: JobHandle, ws, cand: Candidate, res: dict, job_index: Correlation
     ex = res.get("extras") or {}
     s = SimSettings.from_dict(res["settings"])
     checks, pass_prob, _ = score_result(ws, res)
+    qual = quality_of(ws, res, checks)
+    if min_grade and not grade_at_least(qual["grade"], min_grade):
+        h.bump("rejected_quality")
+        return None
     node = lower_text(cand.expr)
     tg = classify(node)
     top = ws.corr_lib.top(d_is, pnl_is, n=1) if ws.corr_lib is not None else []
@@ -106,12 +122,17 @@ def persist(h: JobHandle, ws, cand: Candidate, res: dict, job_index: Correlation
         "os_sharpe": (metrics.get("os") or {}).get("sharpe"), "sub_sharpe": ex.get("sub_sharpe"),
         "max_corr": top[0]["corr"] if top else None, "pass_prob": pass_prob, "status_local": checks["status"],
         "robust": int(bool(checks.get("robust"))), "failed": checks["failed"],
+        "quality": qual["score"], "grade": qual["grade"], "data_source": ws.panel.source,
     }
+    tags = list(tags or [])
+    if ";" in cand.expr.strip().rstrip(";") and "complex" not in tags:
+        tags.append("complex")
     if tags:
         rec["tags"] = ",".join(tags)
     payload = {"metrics": metrics, "yearly": res.get("yearly"), "checks": checks, "extras": ex,
                "sector_pnl": res.get("sector_pnl"), "top_names": res.get("top_names"), "pass_prob": pass_prob,
-               "local_universe": res.get("local_universe"), "universe_size": res.get("universe_size")}
+               "local_universe": res.get("local_universe"), "universe_size": res.get("universe_size"),
+               "quality": qual}
     pnl = _pnl(res, "pnl")
     aid = ws.save_result_record(rec, payload, pnl, res.get("dates_start"))
     if job_index is not None:
@@ -119,20 +140,42 @@ def persist(h: JobHandle, ws, cand: Candidate, res: dict, job_index: Correlation
     h.bump("saved")
     if checks["status"] == "PASS":
         h.bump("passed")
+    h.bump(f"grade_{qual['grade'].lower()}")
     row = {"id": aid, "expr": cand.expr, "sharpe": m_is.get("sharpe"), "fitness": m_is.get("fitness"),
            "turnover": m_is.get("turnover"), "returns": m_is.get("returns"), "status": checks["status"],
            "pass_prob": pass_prob, "os_sharpe": rec["os_sharpe"], "idea": rec["idea"], "origin": cand.origin,
-           "settings": s.to_dict(), "failed": checks["failed"]}
+           "settings": s.to_dict(), "failed": checks["failed"], "grade": qual["grade"], "quality": qual["score"],
+           "reasons": qual["reasons"][:3]}
     h.add_result(row)
     return row
+
+
+GRADE_REWARD = {"A": 1.0, "B": 0.8, "C": 0.3, "D": 0.0}
+
+
+def _reward(bandit: Bandit | None, c: Candidate, grade: str) -> None:
+    if bandit is None:
+        return
+    for arm in (f"idea:{c.idea or 'other'}", f"tmpl:{c.template_id}" if c.template_id else None):
+        if arm:
+            bandit.update(arm, GRADE_REWARD.get(grade, 0.0))
 
 
 def screen_and_save(h: JobHandle, ws, mgr: JobManager, cands: list[Candidate], config: dict,
                     job_index: CorrelationIndex | None = None, span: str = "is", phase: str = "screening",
                     bandit: Bandit | None = None) -> list[tuple[Candidate, dict]]:
-    """Stage 1 (IS) for all, stage 2 (full + extras) for promising ones; saves those above the floor."""
+    """Screen in-sample, shape the promising ones for fitness, fully evaluate the best and save by grade.
+
+    Config keys: save_min_sharpe (IS floor to consider), optimize (bool), optimize_top, full_max,
+    save_min_grade (A..D; default B = passes every local check), tags, dedup_corr/corr_cap, halving."""
+    from .refine import optimize
+
+    cfg = ws.checks_cfg
     save_min = float(config.get("save_min_sharpe", 1.0))
+    min_grade = str(config.get("save_min_grade", "B")).upper()
+    do_opt = bool(config.get("optimize", True))
     corr_cap = float(config.get("corr_cap", 0.7)) if config.get("dedup_corr", True) else None
+    delay = int((cands[0].settings if cands else {}).get("delay", 1) or 1)
     if config.get("halving", True) and len(cands) >= 24 and span == "is":
         # successive halving: cheap 3-year pre-screen, then full IS only for the better half
         h.update(phase=f"{phase} (3-year pre-screen)", done=0, total=len(cands))
@@ -150,20 +193,16 @@ def screen_and_save(h: JobHandle, ws, mgr: JobManager, cands: list[Candidate], c
                 continue
             scored.append((c, m))
         floor = max(0.3, 0.5 * save_min)
-        scored.sort(key=lambda cm: -(cm[1].get("fitness") or -9))
+        scored.sort(key=lambda cm: -quick_score(cm[1], cfg, delay))
         keep = [c for c, m in scored if (m.get("sharpe") or -9) >= floor]
         keep = keep or [c for c, _ in scored[: max(1, len(scored) // 4)]]
-        if bandit is not None:
-            kept = {id(c) for c in keep}
-            for c, _m in scored:
-                if id(c) not in kept:
-                    for arm in (f"idea:{c.idea or 'other'}", f"tmpl:{c.template_id}" if c.template_id else None):
-                        if arm:
-                            bandit.update(arm, 0.0)
+        kept = {id(c) for c in keep}
+        for c, _m in scored:
+            if id(c) not in kept:
+                _reward(bandit, c, "D")
         cands = keep
     payloads = [{"expr": c.expr, "settings": c.settings} for c in cands]
-    total = len(payloads)
-    h.update(phase=phase, done=0, total=total)
+    h.update(phase=phase, done=0, total=len(payloads))
     stage1: list[tuple[Candidate, dict]] = []
 
     def on1(i, r):
@@ -176,24 +215,41 @@ def screen_and_save(h: JobHandle, ws, mgr: JobManager, cands: list[Candidate], c
     for c, r in zip(cands, res1):
         if r.get("ok"):
             stage1.append((c, r))
-            if bandit is not None:
-                m = (r.get("metrics") or {}).get("is")
-                reward = 1.0 if is_gate(m, ws) else 0.0
-                for arm in (f"idea:{c.idea or 'other'}", f"tmpl:{c.template_id}" if c.template_id else None):
-                    if arm:
-                        bandit.update(arm, reward)
-    promising = [(c, r) for c, r in stage1 if ((r.get("metrics") or {}).get("is") or {}).get("sharpe", -9) >= save_min]
+            _reward(bandit, c, quick_grade((r.get("metrics") or {}).get("is"), cfg, delay))
+    promote = "D" if min_grade == "D" else ("C" if do_opt or min_grade == "C" else "B")
+    final_floor = "B" if min_grade in ("A", "B") else min_grade
+    pool = []
+    for c, r in stage1:
+        m = (r.get("metrics") or {}).get("is") or {}
+        if (m.get("sharpe") or -9) >= save_min and grade_at_least(quick_grade(m, cfg, delay), promote):
+            pool.append((c, m))
+    if not pool:
+        return stage1
+    pool.sort(key=lambda cm: -quick_score(cm[1], cfg, delay))
+    if do_opt:
+        n_opt = int(config.get("optimize_top", 6))
+        shaped = optimize(h, ws, mgr, pool[:n_opt], max_shapes=int(config.get("optimize_shapes", 14)),
+                          sweep=bool(config.get("optimize_sweep", True)), label=f"{phase}: shaping")
+        pool = shaped + pool[n_opt:]
+    pool = [(c, m) for c, m in pool if grade_at_least(quick_grade(m, cfg, delay), final_floor)]
+    seen, promising = set(), []
+    for c, m in sorted(pool, key=lambda cm: -quick_score(cm[1], cfg, delay)):
+        k = c.expr + str(sorted(c.settings.items()))
+        if k not in seen:
+            seen.add(k)
+            promising.append(c)
+    promising = promising[: int(config.get("full_max", 12))]
     if not promising:
         return stage1
     h.update(phase="full evaluation", done=0, total=len(promising))
     res2 = mgr.evaluate(h, [{"expr": c.expr, "settings": c.settings, "extras": config.get("final_extras", True)}
-                            for c, _ in promising], "full",
+                            for c in promising], "full",
                         on_result=lambda i, r: h.update(done=h.progress.get("done", 0) + 1))
-    order = sorted(range(len(promising)), key=lambda k: -((res2[k].get("metrics") or {}).get("is") or {}).get(
-        "fitness", -9) if res2[k].get("ok") else 9)
+    order = sorted(range(len(promising)), key=lambda k: -quick_score(((res2[k].get("metrics") or {}).get("is")), cfg,
+                                                                    delay) if res2[k].get("ok") else 9)
     for k in order:
         h.check()
-        persist(h, ws, promising[k][0], res2[k], job_index, corr_cap)
+        persist(h, ws, promising[k], res2[k], job_index, corr_cap, tags=config.get("tags"), min_grade=min_grade)
     return stage1
 
 
@@ -207,7 +263,9 @@ def job_batch(h: JobHandle, ws, mgr: JobManager, config: dict) -> None:
     exprs = [e.strip() for e in exprs if e.strip() and not e.strip().startswith("#")]
     bs = base_settings(config)
     cands = [Candidate(expr=e, settings=bs, origin="batch") for e in exprs]
-    config = {**config, "save_min_sharpe": config.get("save_min_sharpe", -99), "dedup_corr": False}
+    config = {**config, "save_min_sharpe": config.get("save_min_sharpe", -99), "dedup_corr": False,
+              "save_min_grade": config.get("save_min_grade", "D"), "optimize": config.get("optimize", False),
+              "full_max": max(len(exprs), 1)}
     brain_only = []
     local = []
     for c in cands:
@@ -246,7 +304,8 @@ def job_templates(h: JobHandle, ws, mgr: JobManager, config: dict) -> None:
 
 def job_alpha101(h: JobHandle, ws, mgr: JobManager, config: dict) -> None:
     cands = alpha101_candidates(base_settings(config), ws.local_fields(), config.get("variants"))
-    screen_and_save(h, ws, mgr, cands, {**config, "save_min_sharpe": config.get("save_min_sharpe", 0.5)},
+    screen_and_save(h, ws, mgr, cands, {**config, "save_min_sharpe": config.get("save_min_sharpe", 0.5),
+                                        "save_min_grade": config.get("save_min_grade", "C")},
                     job_index=CorrelationIndex(ws._corr_dates()))
 
 
@@ -381,7 +440,8 @@ def finalize_individuals(h: JobHandle, ws, mgr: JobManager, inds: list[Individua
     for c, r in sorted(zip(cands, res), key=lambda cr: -((cr[1].get("metrics") or {}).get("is") or {}).get("fitness", -9)
                        if cr[1].get("ok") else 9):
         h.check()
-        persist(h, ws, c, r, job_index, float(config.get("corr_cap", 0.7)))
+        persist(h, ws, c, r, job_index, float(config.get("corr_cap", 0.7)),
+                min_grade=str(config.get("save_min_grade", "C")))
 
 
 def job_settings_opt(h: JobHandle, ws, mgr: JobManager, config: dict) -> None:
@@ -466,15 +526,28 @@ def job_brain_only(h: JobHandle, ws, mgr: JobManager, config: dict) -> None:
     del bandit
 
 
+def _grade_count(h: JobHandle, target_grade: str) -> int:
+    n = h.stats.get("grade_a", 0)
+    if target_grade.upper() in ("B", "C", "D"):
+        n += h.stats.get("grade_b", 0)
+    return int(n)
+
+
 def job_automine(h: JobHandle, ws, mgr: JobManager, config: dict) -> None:
-    """Bandit-steered loop: templates/grammar -> screen -> settings tune -> doctor -> GP refine -> save."""
+    """Quality-driven loop: bandit-chosen templates + grammar -> screen -> shape -> Doctor near misses ->
+    periodic GP refinement and complex composites -> save alphas graded B or better (A = BRAIN-ready)."""
+    from ..gen.compose import composites
+    from .refine import component_corr, library_components
+
     rng = random.Random(config.get("seed", int(time.time())))
     deadline = time.time() + float(config.get("time_limit_min", 20)) * 60
-    target = int(config.get("target_candidates", 20))
+    target = int(config.get("target_candidates", 10))
+    target_grade = str(config.get("target_grade", "A")).upper()
     bandit = Bandit(ws.store, rng)
     job_index = CorrelationIndex(ws._corr_dates())
     bs = base_settings(config)
     local = ws.local_fields()
+    has_volume = {"volume", "adv20"} <= local
     tmpls = [t for t in load_templates() if expand(t, local_fields=local, limit=1, validate=True)]
     fams = sorted({t.idea for t in tmpls})
     if config.get("families"):
@@ -483,15 +556,19 @@ def job_automine(h: JobHandle, ws, mgr: JobManager, config: dict) -> None:
     seen: set[str] = set()
     rnd = 0
     pool_promising: list[tuple[Candidate, dict]] = []
-    while time.time() < deadline and h.stats.get("passed", 0) < target:
+    cfg = ws.checks_cfg
+    save_cfg = {**config, "save_min_sharpe": float(config.get("save_min_sharpe", 1.0)),
+                "save_min_grade": str(config.get("save_min_grade", "B"))}
+    while time.time() < deadline and _grade_count(h, target_grade) < target:
         h.check()
         rnd += 1
         # 1) choose families by Thompson sampling, expand fresh candidates
         weights = bandit.weights([f"idea:{f}" for f in fams])
         cands: list[Candidate] = []
         batch = int(config.get("round_size", 24))
+        grammar_share = float(config.get("grammar_share", 0.2))
         for _ in range(batch * 3):
-            if len(cands) >= int(batch * 0.8):
+            if len(cands) >= int(batch * (1 - grammar_share)):
                 break
             fam = rng.choices(fams, weights=[weights[f"idea:{f}"] + 0.02 for f in fams])[0]
             t = rng.choice([t for t in tmpls if t.idea == fam])
@@ -506,7 +583,9 @@ def job_automine(h: JobHandle, ws, mgr: JobManager, config: dict) -> None:
             seen.add(key)
             cands.append(Candidate(expr=e, settings=s, template_id=t.id, idea=t.idea, category=t.category,
                                    horizon=t.horizon, rationale=t.rationale, origin="automine"))
-        while len(cands) < batch:
+        tries = 0
+        while len(cands) < batch and tries < batch * 10:
+            tries += 1
             node = g.tree()
             if is_degenerate(node):
                 continue
@@ -517,18 +596,20 @@ def job_automine(h: JobHandle, ws, mgr: JobManager, config: dict) -> None:
             cands.append(Candidate(expr=e, settings=dict(bs, decay=rng.choice([0, 3, 6])), origin="automine",
                                    idea=classify(node)["idea"]))
         h.update(phase=f"round {rnd}: screening", round=rnd)
-        stage1 = screen_and_save(h, ws, mgr, cands, {**config, "save_min_sharpe": float(config.get("save_min_sharpe", 1.2))},
-                                 job_index, span="is", phase=f"round {rnd}: screening", bandit=bandit)
-        # 2) near misses -> settings tweaks and doctor fixes
-        near = [(c, r) for c, r in stage1 if 0.7 <= ((r.get("metrics") or {}).get("is") or {}).get("sharpe", 0) and
-                not is_gate((r.get("metrics") or {}).get("is"), ws)]
-        near.sort(key=lambda cr: -((cr[1].get("metrics") or {}).get("is") or {}).get("fitness", 0))
+        stage1 = screen_and_save(h, ws, mgr, cands, save_cfg, job_index, span="is", phase=f"round {rnd}: screening",
+                                 bandit=bandit)
+        # 2) near misses -> Doctor fixes (the shaper already handled the fitness/turnover side)
+        near = []
+        for c, r in stage1:
+            m = (r.get("metrics") or {}).get("is") or {}
+            if (m.get("sharpe") or 0) >= 0.7 and quick_grade(m, cfg, int(c.settings.get("delay", 1))) in ("C", "D"):
+                near.append((c, r))
+        near.sort(key=lambda cr: -quick_score((cr[1].get("metrics") or {}).get("is"), cfg))
         pool_promising.extend(near[:6])
         fixes: list[Candidate] = []
         for c, r in near[:6]:
             m = (r.get("metrics") or {}).get("is") or {}
             failed = []
-            cfg = ws.checks_cfg
             if m.get("turnover", 0) > cfg["turnover_max"]:
                 failed.append("HIGH_TURNOVER")
             if m.get("turnover", 0) < cfg["turnover_min"]:
@@ -543,7 +624,7 @@ def job_automine(h: JobHandle, ws, mgr: JobManager, config: dict) -> None:
                 node = lower_text(c.expr)
             except Exception:  # noqa: BLE001
                 continue
-            for f in diagnose(node, c.settings, failed, m, has_volume={"volume", "adv20"} <= local)[:5]:
+            for f in diagnose(node, c.settings, failed, m, has_volume=has_volume)[:5]:
                 e = to_expr(f.node)
                 key = e + str(sorted(f.settings.items()))
                 if key in seen:
@@ -553,8 +634,8 @@ def job_automine(h: JobHandle, ws, mgr: JobManager, config: dict) -> None:
                                        category=c.category, horizon=c.horizon, rationale=c.rationale,
                                        origin="doctor"))
         if fixes and time.time() < deadline:
-            screen_and_save(h, ws, mgr, fixes, {**config, "save_min_sharpe": float(config.get("save_min_sharpe", 1.2))},
-                            job_index, span="is", phase=f"round {rnd}: doctor fixes")
+            screen_and_save(h, ws, mgr, fixes, {**save_cfg, "optimize_top": 3}, job_index, span="is",
+                            phase=f"round {rnd}: doctor fixes")
         # 3) GP refinement every few rounds from the best material found so far
         if rnd % int(config.get("gp_every", 3)) == 0 and time.time() < deadline - 60:
             seeds = []
@@ -569,8 +650,24 @@ def job_automine(h: JobHandle, ws, mgr: JobManager, config: dict) -> None:
                       "generations": int(config.get("gp_generations", 5)), "islands": 1,
                       "time_limit_min": max(1.0, (deadline - time.time()) / 60 / 2)}
             hof = run_gp(h, ws, mgr, gp_cfg, seeds, job_index)
-            finalize_individuals(h, ws, mgr, hof, config, job_index)
-        h.update(phase=f"round {rnd} done", passed=h.stats.get("passed", 0))
+            finalize_individuals(h, ws, mgr, hof, {**config, "save_min_grade": save_cfg["save_min_grade"]}, job_index)
+        # 4) complex alphas: compose decorrelated good alphas into multi-statement programs
+        compose_due = rnd % int(config.get("compose_every", 4)) == 0
+        if config.get("compose", True) and compose_due and time.time() < deadline - 60:
+            comps = library_components(ws, {"max_library": 24, "min_grade": "B", "min_sharpe": 1.0})
+            if len(comps) >= 2:
+                progs = composites(comps, component_corr(ws, comps), local_fields=local, has_volume=has_volume,
+                                   limit=int(config.get("compose_n", 8)))
+                ccands = [Candidate(expr=p.text, settings={**bs, "decay": 0}, idea=p.parts[0].family,
+                                    rationale=p.label, origin="compose",
+                                    parents=[c.alpha_id for c in p.parts if c.alpha_id]) for p in progs
+                          if p.text not in seen]
+                seen.update(c.expr for c in ccands)
+                if ccands:
+                    screen_and_save(h, ws, mgr, ccands, {**save_cfg, "halving": False, "tags": ["complex"],
+                                                         "optimize_top": 3}, job_index, span="is",
+                                    phase=f"round {rnd}: complex composites")
+        h.update(phase=f"round {rnd} done", passed=h.stats.get("passed", 0), grade_a=h.stats.get("grade_a", 0))
     if config.get("include_brain_only"):
         job_brain_only(h, ws, mgr, {**config, "per_template": 2, "n_field_candidates": 10})
 
@@ -594,8 +691,8 @@ def job_data_build(h: JobHandle, ws, mgr: JobManager, config: dict) -> None:
     def prog(phase: str, done: int, total: int, msg: str) -> None:
         h.update(phase=f"{phase}: {msg}", done=done, total=total, stage=phase)
 
-    info = build_real(prog, cancelled=h.cancelled, max_tickers=config.get("max_tickers"))
-    h.stats.update({"tickers": info["tickers"], "days": info["days"]})
+    info = build_real(prog, cancelled=h.cancelled, max_tickers=config.get("max_tickers"), pool=config.get("pool"))
+    h.stats.update({"tickers": info["tickers"], "days": info["days"], "pool": info.get("pool")})
     ws.update_settings({"active_dataset": "auto"})
     ws.load_panel()
     mgr.reset_pool()
@@ -633,3 +730,22 @@ JOB_KINDS["data_build"] = job_data_build
 JOB_KINDS["demo_build"] = job_demo_build
 JOB_KINDS["reengineer"] = job_reengineer
 JOB_KINDS["forge"] = job_forge
+
+
+def job_compose(h: JobHandle, ws, mgr: JobManager, config: dict) -> None:
+    """Complex (multi-statement) alphas from decorrelated library alphas (see jobs/refine.py)."""
+    from .refine import job_compose as run
+
+    run(h, ws, mgr, config)
+
+
+JOB_KINDS["compose"] = job_compose
+
+
+def _register_brain_jobs() -> None:
+    from .brain_jobs import BRAIN_JOB_KINDS
+
+    JOB_KINDS.update(BRAIN_JOB_KINDS)
+
+
+_register_brain_jobs()

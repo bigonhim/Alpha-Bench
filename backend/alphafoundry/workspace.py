@@ -30,6 +30,7 @@ from .fastexpr.lower import node_info
 from .gen.doctor import diagnose
 from .sim.checks import FAIL, HARD_CHECKS, load_checks_config, run_checks
 from .sim.correlation import CorrelationIndex, cluster_order
+from .sim.quality import assess
 from .sim.robustness import perturbed_variants, robust_pick, stability_score, sweep_grid
 from .sim.simulator import (Periods, SimResult, SimSettings, compute_periods, deflated_sharpe, resolve_sub_universe,
                             resolve_universe, simulate, sweep_cells)
@@ -73,7 +74,21 @@ class Workspace:
             self.periods = compute_periods(self.panel, self.settings)
             self.cache.clear()
             self._recent.clear()
+            self._label_data_sources()
             self._build_corr_indexes()
+
+    def _label_data_sources(self) -> None:
+        """Record which dataset each simulated alpha came from (alphas mined on demo data are flagged)."""
+        import json
+
+        for root in (config.DEMO_PANELS_DIR, config.PANELS_DIR):
+            try:
+                meta = json.loads((root / "meta.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            src = "demo" if meta.get("source") == "demo" else "real"
+            self.store.x("UPDATE alphas SET data_source=? WHERE data_source IS NULL AND id IN "
+                         "(SELECT alpha_id FROM results WHERE data_version=?)", (src, meta.get("version")))
 
     def local_fields(self) -> set[str]:
         assert self.panel is not None
@@ -113,6 +128,8 @@ class Workspace:
             "settings": self.settings,
             "library_indexed": len(self.corr_lib or []),
             "submitted_indexed": len(self.corr_sub or []),
+            "demo_mining_blocked": p is not None and p.source == "demo"
+                                   and not self.settings.get("allow_demo_mining"),
         }
 
     # ------------------------------------------------------------------ analysis
@@ -162,9 +179,13 @@ class Workspace:
         pnl_is = res.pnl[a:b]
         skew = float(((pnl_is - pnl_is.mean()) ** 3).mean() / (pnl_is.std() ** 3 + 1e-12)) if len(pnl_is) > 10 else 0.0
         kurt = float(((pnl_is - pnl_is.mean()) ** 4).mean() / (pnl_is.var() ** 2 + 1e-12)) if len(pnl_is) > 10 else 3.0
+        quality = assess(res.metrics, checks, self.checks_cfg, delay=s.delay, extras=extras, yearly=res.yearly,
+                         complexity=an_json.get("size"),
+                         expected_brain_sharpe=self.cal.trusted_brain_sharpe(m_is.get("sharpe", 0.0)))
         return {
             "ok": True,
             "brain_only": False,
+            "quality": quality,
             "analysis": an_json,
             "settings": s.to_dict(),
             "local_universe": res.local_universe,
@@ -260,7 +281,11 @@ class Workspace:
         failed_hard = sum(1 for c in checks["checks"] if c["name"] in HARD_CHECKS and c["result"] == FAIL)
         feats = {**m_is, "os_sharpe": res.metrics.get("os", {}).get("sharpe"), "sub_sharpe": ex.get("sub_sharpe"),
                  "complexity": node.size}
-        return {"ok": True, "extras": ex, "checks": checks, "pass_prob": self.cal.predict(feats, failed_hard)}
+        quality = assess(res.metrics, checks, self.checks_cfg, delay=s.delay, extras=ex, yearly=res.yearly,
+                         complexity=node.size,
+                         expected_brain_sharpe=self.cal.trusted_brain_sharpe(m_is.get("sharpe", 0.0)))
+        return {"ok": True, "extras": ex, "checks": checks, "pass_prob": self.cal.predict(feats, failed_hard),
+                "quality": quality}
 
     # ------------------------------------------------------------------ sweep / doctor
     def sweep(self, text: str, settings: dict | None = None, grid: dict | None = None) -> Iterator[dict]:
@@ -381,10 +406,14 @@ class Workspace:
             "max_corr": (res["correlation"]["top"][0]["corr"] if res["correlation"]["top"] else None),
             "pass_prob": res.get("pass_prob"), "status_local": res["checks"]["status"],
             "robust": int(bool(res["checks"].get("robust"))), "failed": res["checks"]["failed"],
+            "quality": (res.get("quality") or {}).get("score"), "grade": (res.get("quality") or {}).get("grade"),
+            "data_source": self.panel.source,
         })
+        if ";" in text.strip().rstrip(";"):
+            rec["tags"] = ",".join(sorted(set(filter(None, (rec.get("tags") or "").split(","))) | {"complex"}))
         aid = self.store.upsert_alpha(rec)
         payload = {k: res.get(k) for k in ("metrics", "yearly", "checks", "extras", "sector_pnl", "top_names",
-                                           "dsr", "pass_prob", "local_universe", "universe_size")}
+                                           "dsr", "pass_prob", "local_universe", "universe_size", "quality")}
         pnl = np.asarray(res["series"]["cum_pnl"], dtype=np.float64)
         daily = np.diff(np.r_[0.0, pnl])
         dates_start = res["series"]["dates"][0]

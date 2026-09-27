@@ -1,6 +1,8 @@
-import { BookOpen, Database, FlaskConical, Import, LayoutDashboard, Library, Moon, PanelLeft, Pickaxe, Search, Settings, Sun, Wand2 } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
+import { AlertTriangle, BookOpen, Cloud, Database, FlaskConical, Import, LayoutDashboard, Library, Moon, PanelLeft, Pickaxe, Search, Settings, Sun, Wand2 } from "lucide-react";
 import type { ReactNode } from "react";
 import { NavLink, useLocation } from "react-router-dom";
+import { api } from "../lib/api";
 import { useStatus } from "../lib/hooks";
 import { clsx } from "../lib/format";
 import { useJobs, useUI } from "../lib/store";
@@ -12,6 +14,7 @@ export const NAV = [
   { to: "/forge", label: "Idea Forge", icon: Wand2 },
   { to: "/miner", label: "Miner", icon: Pickaxe },
   { to: "/library", label: "Library", icon: Library },
+  { to: "/brain", label: "BRAIN", icon: Cloud },
   { to: "/import", label: "BRAIN import", icon: Import },
   { to: "/explorer", label: "Explorer", icon: BookOpen },
   { to: "/data", label: "Data", icon: Database },
@@ -25,6 +28,8 @@ export function Layout({ children }: { children: ReactNode }) {
   const running = useJobs((s) => Object.values(s.jobs).filter((j) => j.status === "running" || j.status === "paused").length);
   const loc = useLocation();
   const title = NAV.find((n) => (n.to === "/" ? loc.pathname === "/" : loc.pathname.startsWith(n.to)))?.label ?? "";
+  const { data: brain } = useQuery({ queryKey: ["brain-status"], queryFn: api.brain.status, refetchInterval: 120_000, retry: 0 });
+  const demo = status?.data?.source === "demo";
   return (
     <div className="flex h-full">
       <aside className={clsx("flex shrink-0 flex-col border-r border-[var(--border)] bg-[var(--surface-1)] transition-all", sidebar ? "w-52" : "w-14")}>
@@ -71,6 +76,11 @@ export function Layout({ children }: { children: ReactNode }) {
             </Tip>
           )}
           {status && !status.warm && <span className="chip">warming up engine…</span>}
+          <Tip content={brain?.connected ? `Signed in to BRAIN (user ${brain.user_id}); ${brain.usage_today} simulations today` : "Not connected to BRAIN: sign in on the BRAIN page to simulate there"}>
+            <NavLink to="/brain" className={clsx("chip", brain?.connected ? "!text-[var(--good-text)]" : "!text-muted")}>
+              <Cloud size={11} className="mr-1 inline" /> {brain?.connected ? "BRAIN connected" : "BRAIN offline"}
+            </NavLink>
+          </Tip>
           <div className="ml-auto flex items-center gap-2">
             {running > 0 && (
               <NavLink to="/miner" className="chip !text-[var(--accent)]">
@@ -91,6 +101,15 @@ export function Layout({ children }: { children: ReactNode }) {
             </button>
           </div>
         </header>
+        {demo && (
+          <div className="flex items-center gap-2 border-b border-[var(--border)] bg-[var(--surface-2)] px-4 py-1.5 text-[12px] text-[var(--warn-text)]" role="alert">
+            <AlertTriangle size={14} className="shrink-0" />
+            <span>
+              You are on the <b>synthetic demo data</b>. Alphas found here come from effects planted in the demo generator and will not pass on BRAIN, so mining is disabled.{" "}
+              <NavLink to="/data" className="underline">Build real data</NavLink> first.
+            </span>
+          </div>
+        )}
         <main className="min-h-0 flex-1 overflow-auto">{children}</main>
       </div>
     </div>

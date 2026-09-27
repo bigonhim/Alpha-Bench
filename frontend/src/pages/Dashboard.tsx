@@ -47,7 +47,7 @@ export default function Dashboard() {
         {isFetching && <Spinner />}
       </div>
       <div className="grid grid-cols-1 gap-3 xl:grid-cols-12">
-        <Card title="Top submission candidates (by BRAIN pass likelihood)" className="xl:col-span-8" bodyClass="px-0 pb-1">
+        <Card title="Top submission candidates (by quality grade, active dataset only)" className="xl:col-span-8" bodyClass="px-0 pb-1">
           {data.top_candidates.length === 0 ? (
             <Empty title="No passing candidates yet">Start an Auto-Mine run or write alphas in the Studio.</Empty>
           ) : (

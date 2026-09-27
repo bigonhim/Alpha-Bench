@@ -24,3 +24,17 @@ local_gates:
   positive_years_min: 0.7      # share of IS years with positive PnL
   stability_min: 0.7           # Sharpe retained when windows are perturbed +/-25%
   drawdown_max: 0.5            # max drawdown (fraction of half book)
+
+# Alpha Foundry quality grade (A = BRAIN-ready ... D). Local metrics are a proxy for BRAIN's, so an alpha
+# must clear BRAIN's thresholds with a margin and show evidence the edge is real before it is graded A.
+quality:
+  sharpe_margin: 1.25          # local IS Sharpe >= 1.25 x BRAIN minimum (1.56 at delay 1)
+  fitness_margin: 1.25         # local IS fitness >= 1.25 x BRAIN minimum
+  turnover_band: [0.03, 0.45]  # comfortable band inside the 1%-70% limits
+  brain_window_margin: 1.0     # Sharpe over the latest 5 IS years (BRAIN-like window) >= minimum
+  os_sharpe_min: 0.6           # holdout Sharpe stays clearly positive ...
+  os_ratio_min: 0.45           # ... and keeps this share of the IS Sharpe
+  stability_min: 0.7           # Sharpe kept when every window moves +/-25%
+  positive_years_min: 0.7      # share of profitable IS years
+  max_complexity: 40           # expression nodes
+  near_miss: 0.8               # grade C: the one failing value is within 80% of its limit

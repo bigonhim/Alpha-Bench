@@ -55,6 +55,13 @@ class Calibrator:
             return None
         return round(self.sharpe_map["slope"] * local_sharpe + self.sharpe_map["intercept"], 3)
 
+    def trusted_brain_sharpe(self, local_sharpe: float, min_n: int = 12, min_r2: float = 0.25) -> float | None:
+        """The calibrated BRAIN Sharpe estimate, only once enough imported results support the mapping."""
+        sm = self.sharpe_map
+        if not sm or int(sm.get("n", 0)) < min_n or float(sm.get("r2", 0.0)) < min_r2:
+            return None
+        return self.expected_brain_sharpe(local_sharpe)
+
     def fit(self, rows: list[dict]) -> dict:
         """rows: brain_results joined with local metrics (keys local_sharpe, sharpe (brain), passed, ...)."""
         pairs = [(r.get("local_sharpe"), r.get("sharpe")) for r in rows

@@ -614,6 +614,114 @@ templates:
     settings: {decay: [2, 4]}
     rationale: "Trade reversal on high-volume days, fall back to value otherwise."
 
+  # ------------------------------------------------------------------ structures that tend to survive on BRAIN
+  - id: rev_volume_weighted
+    idea: reversion
+    category: pv
+    horizon: short
+    expr: "-rank(ts_delta(close, {w})) * rank(volume / adv20)"
+    slots: {w: {windows: [3, 5]}}
+    settings: {decay: [4, 8], neutralization: [SUBINDUSTRY, INDUSTRY]}
+    rationale: "Reversal scaled up where the move came on heavy volume (liquidity demand that later reverses)."
+  - id: mom_residual_sector
+    idea: momentum
+    category: pv
+    horizon: long
+    expr: "group_rank(ts_delay(ts_sum(returns - group_mean(returns, 1, sector), {L}), 21), {g})"
+    slots: {L: {windows: [126, 252]}, g: {groups: [industry, subindustry]}}
+    settings: {decay: [4, 8], neutralization: [INDUSTRY, SUBINDUSTRY]}
+    rationale: "Stock-specific momentum after removing the sector trend; less crowded than raw momentum."
+  - id: g_eps_surprise_event
+    idea: growth
+    category: fundamental
+    horizon: medium
+    expr: "trade_when(days_from_last_change(ts_backfill(eps, 120)) < {k}, group_rank(ts_delta(ts_backfill(eps, 120), 63) / close, industry), -1)"
+    slots: {k: {values: ["10", "20"]}}
+    settings: {decay: [0, 4], neutralization: [INDUSTRY]}
+    rationale: "Post-earnings drift: position right after a new filing in the direction of the EPS change."
+  - id: val_tsrank_zscore
+    idea: value
+    category: fundamental
+    horizon: medium
+    expr: "group_rank(ts_zscore(ts_backfill({num}, 120) / cap, {w}), {g})"
+    slots: {num: {fields: [income, cashflow_op, ebitda, sales]}, w: {windows: [63, 126]}, g: {groups: [industry, subindustry]}}
+    settings: {decay: [2, 6], neutralization: [INDUSTRY, SUBINDUSTRY]}
+    rationale: "A stock cheap versus its own recent history and versus peers; the time-series part keeps turnover in range."
+
+  # ------------------------------------------------------------------ complex (multi-statement) composites
+  - id: cx_value_composite
+    idea: value
+    category: fundamental
+    horizon: long
+    expr: |
+      ey = rank(ts_backfill(income, 120) / cap);
+      cfy = rank(ts_backfill(cashflow_op, 120) / cap);
+      bm = rank(ts_backfill(equity, 120) / cap);
+      sy = rank(ts_backfill(sales, 120) / cap);
+      group_rank(ey + cfy + bm + sy, {g})
+    slots: {g: {groups: [industry, subindustry]}}
+    settings: {decay: [0, 4], neutralization: [INDUSTRY, SUBINDUSTRY]}
+    rationale: "Composite value: four yields ranked and averaged within peers are steadier than any single multiple."
+  - id: cx_quality_minus_junk
+    idea: quality
+    category: fundamental
+    horizon: long
+    expr: |
+      profit = rank(ts_backfill(operating_income, 120) / ts_backfill(assets, 120));
+      growth = rank(ts_delta(ts_backfill(operating_income, 120) / ts_backfill(assets, 120), 252));
+      safety = rank(-ts_backfill(debt, 120) / ts_backfill(assets, 120)) + rank(-ts_std_dev(returns, {w}));
+      group_rank(profit + growth + 0.5 * safety, {g})
+    slots: {w: {windows: [60, 126]}, g: {groups: [industry, subindustry]}}
+    settings: {decay: [0, 4], neutralization: [INDUSTRY, SUBINDUSTRY]}
+    rationale: "Quality minus junk: profitable, improving and safe (low leverage, low volatility) firms outperform."
+  - id: cx_fscore_like
+    idea: quality
+    category: fundamental
+    horizon: long
+    expr: |
+      roa = ts_backfill(income, 120) / ts_backfill(assets, 120);
+      cfo = ts_backfill(cashflow_op, 120) / ts_backfill(assets, 120);
+      lev = ts_backfill(liabilities, 120) / ts_backfill(assets, 120);
+      score = rank(roa) + rank(cfo) + rank(ts_delta(roa, 252)) + rank(-ts_delta(lev, 252)) + rank(cfo - roa);
+      group_rank(score, {g})
+    slots: {g: {groups: [industry, subindustry]}}
+    settings: {decay: [0, 4], neutralization: [INDUSTRY]}
+    rationale: "A Piotroski-style fundamental score: profitability, cash earnings, improvement and deleveraging."
+  - id: cx_reversal_by_volatility
+    idea: reversion
+    category: pv
+    horizon: short
+    expr: |
+      rev = rank(-ts_delta(close, {w}));
+      vol_rank = rank(ts_std_dev(returns, 20));
+      trade_when(volume > adv20, vol_rank > 0.5 ? rev : 0.5 * rev, -1)
+    slots: {w: {windows: [3, 5]}}
+    settings: {decay: [4, 8], neutralization: [SUBINDUSTRY, INDUSTRY]}
+    rationale: "Reversal is strongest in volatile names; trading it only on volume events keeps turnover down."
+  - id: cx_momentum_quality_tilt
+    idea: momentum
+    category: pv
+    horizon: long
+    expr: |
+      mom = group_rank(ts_delay(ts_sum(returns, {L}), 21), industry);
+      quality = rank(ts_backfill(cashflow_op, 120) / ts_backfill(assets, 120));
+      mom * (0.5 + quality)
+    slots: {L: {windows: [126, 231]}}
+    settings: {decay: [4, 8], neutralization: [INDUSTRY, SUBINDUSTRY]}
+    rationale: "Momentum works better in profitable firms (fewer momentum crashes); quality tilts the position size."
+  - id: cx_multi_horizon_reversal
+    idea: reversion
+    category: pv
+    horizon: short
+    expr: |
+      r_short = rank(-ts_sum(returns - group_mean(returns, 1, {g}), 3));
+      r_mid = rank(-ts_sum(returns - group_mean(returns, 1, {g}), 5));
+      r_long = rank(-ts_sum(returns - group_mean(returns, 1, {g}), 10));
+      ts_decay_linear((r_short + r_mid + r_long) / 3, {d})
+    slots: {g: {groups: [industry, subindustry]}, d: {windows: [3, 5]}}
+    settings: {decay: [0, 3], neutralization: [SUBINDUSTRY]}
+    rationale: "Peer-relative reversal averaged over three horizons: robust to the window choice, smoothed for fitness."
+
   # ------------------------------------------------------------------ BRAIN-only data (cannot be simulated locally)
   - id: brain_news_regime
     idea: sentiment

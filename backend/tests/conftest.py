@@ -5,6 +5,9 @@ import tempfile
 
 # isolate all runtime state (panels, DB, settings) for the test session
 os.environ.setdefault("ALPHAFOUNDRY_RUNTIME", tempfile.mkdtemp(prefix="af_test_runtime_"))
+os.environ.setdefault("ALPHAFOUNDRY_SESSION_DIR", tempfile.mkdtemp(prefix="af_test_session_"))
+# the tests exercise the miners on the synthetic demo panel on purpose
+os.environ.setdefault("ALPHAFOUNDRY_ALLOW_DEMO_MINING", "1")
 
 import numpy as np
 import pytest

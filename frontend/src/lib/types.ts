@@ -137,6 +137,7 @@ export interface SimResult {
   description?: Description;
   elapsed_ms?: number;
   data?: { source: string; version: string };
+  quality?: Quality;
 }
 
 export interface Alpha {
@@ -178,6 +179,38 @@ export interface Alpha {
   failed: string[];
   created_at: string;
   updated_at: string;
+  quality?: number | null;
+  grade?: Grade | null;
+  brain_alpha_id?: string | null;
+  data_source?: string | null;
+}
+
+export type Grade = "A" | "B" | "C" | "D";
+
+export interface Quality {
+  grade: Grade;
+  score: number;
+  reasons: string[];
+  evidence: string[];
+  brain_ready: boolean;
+  margins: { sharpe: number; fitness: number };
+}
+
+export interface BrainStatus {
+  connected: boolean;
+  user_id?: string | null;
+  expiry_s?: number | null;
+  permissions: string[];
+  multi_allowed: boolean;
+  usage_today: number;
+  budget: number;
+  budget_left: number;
+  settings: { concurrency: number; multi: string; daily_budget: number; check_passing: boolean; region: string; universe: string; delay: number };
+  keyring_available: boolean;
+  credentials_saved: boolean;
+  saved_email?: string | null;
+  persona_url?: string | null;
+  ratelimit?: Record<string, string>;
 }
 
 export interface OpParam {
@@ -254,6 +287,12 @@ export interface JobResultRow {
   origin?: string;
   settings?: Settings;
   failed?: string[];
+  grade?: Grade | null;
+  quality?: number;
+  brain_id?: string;
+  passed?: boolean | null;
+  status_brain?: string;
+  message?: string;
 }
 
 export interface GPStat {
@@ -357,6 +396,8 @@ export interface Status {
     groups: Record<string, number>;
     universes: string[];
     built?: string;
+    pool?: string;
+    classification?: string | null;
   };
   periods: { is_start: string; os_start: string; end: string; brain_start: string };
   cache: { entries: number; mb: number; hits: number; misses: number; hit_rate: number };
@@ -367,6 +408,7 @@ export interface Status {
   jobs_running: JobSnapshot[];
   defaults: Settings;
   universe_map: Record<string, string>;
+  demo_mining_blocked?: boolean;
 }
 
 /* ---------------------------------------------------------------- Idea Forge */
@@ -401,6 +443,12 @@ export interface IdeaSpec {
   preview?: { expr: string; label: string; family: string; origin: string }[];
   templates?: { id: string; idea: string; rationale: string; score: number }[];
   all_families?: { id: string; label: string }[];
+  input_format?: string;
+  input_formats?: string[];
+  compiled?: { label: string; expr: string }[];
+  sub_ideas?: string[];
+  key_sentences?: string[];
+  settings_hints?: Record<string, string | number>;
 }
 
 export interface ForgeAlpha {
@@ -432,12 +480,19 @@ export interface ForgeAlpha {
   sign: number;
   foreign: string[];
   missing: string[];
+  grade?: Grade | null;
+  quality?: number | null;
+  quality_reasons?: string[];
+  quality_evidence?: string[];
+  complex?: boolean;
 }
 
 export interface ForgeResult {
   champion: ForgeAlpha | null;
   runners: ForgeAlpha[];
   faithful?: ForgeAlpha | null;
+  simple?: ForgeAlpha | null;
+  complex?: ForgeAlpha | null;
   message: string;
   hypothesis?: { holds: boolean | null; text: string; sharpe_hyp?: number; sharpe_rev?: number };
   brain_only: { id: number; expr: string; label: string; settings: Settings }[];

@@ -1,12 +1,14 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowRight,
+  Blocks,
   Braces,
   Check,
   CircleDashed,
   Clipboard,
   CloudUpload,
   Dna,
+  FileUp,
   FlaskConical,
   GitMerge,
   Library,
@@ -27,10 +29,10 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 import { ChartsCard, ChecksList, DescriptionCard } from "../components/ResultView";
 import { SettingsBar } from "../components/SettingsBar";
-import { Card, Empty, Kv, Progress, Spinner, StatusBadge, Tip } from "../components/ui";
-import { api, copyText } from "../lib/api";
+import { Card, Empty, GradeBadge, Kv, Progress, Spinner, StatusBadge, Tip, Toggle } from "../components/ui";
+import { api, copyText, fileToBase64 } from "../lib/api";
 import { clsx, fmt } from "../lib/format";
-import { useDebounced, useHotkey } from "../lib/hooks";
+import { useDebounced, useHotkey, useStatus } from "../lib/hooks";
 import { DEFAULT_SETTINGS, useJobs, useUI } from "../lib/store";
 import type { ForgeAlpha, ForgeResult, ForgeRow, ForgeStage, IdeaSpec, JobSnapshot, Settings } from "../lib/types";
 
@@ -40,19 +42,29 @@ const EXAMPLES = [
   "Cheap stocks by cash-flow yield that are starting to trend up keep outperforming.",
   "Momentum works better among low-volatility stocks.",
   "After earnings announcements, stocks with improving EPS keep drifting up for about a month.",
+  "Signal = 12-month return skipping the last month, ranked within industry; neutralize by industry, decay 4",
+  "(-1 * correlation(rank(delta(log(volume), 2)), rank(((close - open) / open)), 6))",
 ];
 
+const FORMAT_LABEL: Record<string, string> = {
+  english: "plain English", fastexpr: "Fast Expression", paper: "paper / 101-Alphas formula", python: "Python / pandas code",
+  json: "JSON record", yaml: "YAML record", list: "list of ideas", document: "long document", formula: "written formula",
+  mixed: "text + code", described: "described computation",
+};
+const TEXT_EXT = /\.(txt|md|markdown|csv|tsv|json|ya?ml|py|r|sql|tex|log)$/i;
+
 const EFFORTS = [
-  { id: "quick", label: "Quick", hint: "up to ~4 min: fewer drafts, short evolution" },
-  { id: "standard", label: "Standard", hint: "up to ~10 min: the balanced default" },
-  { id: "deep", label: "Deep", hint: "up to ~25 min: more drafts, longer two-island evolution" },
+  { id: "quick", label: "Quick", hint: "up to ~5 min: fewer drafts, short evolution" },
+  { id: "standard", label: "Standard", hint: "up to ~12 min: the balanced default" },
+  { id: "deep", label: "Deep", hint: "up to ~28 min: more drafts, longer two-island evolution" },
 ] as const;
 
 const STAGES = [
   { id: "interpret", label: "Interpret", icon: Lightbulb, desc: "Read the idea" },
   { id: "draft", label: "Draft", icon: PenLine, desc: "Build and screen first drafts" },
   { id: "combine", label: "Combine", icon: GitMerge, desc: "Blends, gates, neutralizations" },
-  { id: "refine", label: "Refine", icon: Stethoscope, desc: "Doctor fixes and settings sweep" },
+  { id: "refine", label: "Refine", icon: Stethoscope, desc: "Doctor fixes, fitness shaping and settings sweep" },
+  { id: "compose", label: "Compose", icon: Blocks, desc: "Complex (multi-statement) alphas from the leaders" },
   { id: "evolve", label: "Evolve", icon: Dna, desc: "Genetic programming on the leaders" },
   { id: "polish", label: "Polish", icon: Sparkles, desc: "Full checks, champion, runners-up" },
 ] as const;
@@ -152,6 +164,53 @@ function Interpretation({
           <Progress value={conf} className="max-w-[160px]" />
           <span className="text-[11.5px] text-ink2">{conf >= 0.75 ? "Clear reading" : conf >= 0.5 ? "Reasonable reading" : "Loose reading: add detail for a sharper search"}</span>
         </div>
+
+        {spec.input_format && spec.input_format !== "english" && (
+          <Section label="Read as">
+            <div className="flex flex-wrap gap-1">
+              {(spec.input_formats ?? [spec.input_format]).map((f) => (
+                <span key={f} className="chip">{FORMAT_LABEL[f] ?? f}</span>
+              ))}
+              {Object.entries(spec.settings_hints ?? {}).map(([k, v]) => (
+                <span key={k} className="chip !text-[var(--accent)]">{k} {String(v)}</span>
+              ))}
+            </div>
+          </Section>
+        )}
+        {spec.compiled && spec.compiled.length > 0 && (
+          <Section label="Formulas built from your description">
+            <div className="flex flex-col divide-y divide-[var(--hairline)]">
+              {spec.compiled.map((c) => (
+                <button key={c.expr} className="group flex items-center gap-2 py-1 text-left" onClick={() => onOpen(c.expr)} title="Open in Studio">
+                  <span className="min-w-0 flex-1">
+                    <span className="mono block truncate text-[11.5px] text-ink">{c.expr}</span>
+                    <span className="block truncate text-[10.5px] text-muted">{c.label}</span>
+                  </span>
+                  <ArrowRight size={12} className="shrink-0 text-muted opacity-0 group-hover:opacity-100" />
+                </button>
+              ))}
+            </div>
+          </Section>
+        )}
+        {spec.key_sentences && spec.key_sentences.length > 0 && (
+          <details className="text-[12px]">
+            <summary className="cursor-pointer text-[10px] font-semibold uppercase tracking-wide text-muted">Key sentences used from the document ({spec.key_sentences.length})</summary>
+            <ul className="mt-1 flex flex-col gap-1 text-ink2">
+              {spec.key_sentences.map((k) => (
+                <li key={k}>“{k}”</li>
+              ))}
+            </ul>
+          </details>
+        )}
+        {spec.sub_ideas && spec.sub_ideas.length > 1 && (
+          <Section label={`${spec.sub_ideas.length} ideas, combined into one search`}>
+            <ul className="flex flex-col gap-0.5 text-[12px] text-ink2">
+              {spec.sub_ideas.map((x) => (
+                <li key={x}>• {x}</li>
+              ))}
+            </ul>
+          </Section>
+        )}
 
         <Section label="Mechanism and direction">
           <div className="flex flex-col gap-1">
@@ -297,7 +356,7 @@ function Interpretation({
 
 function StageStepper({ stages, current, live }: { stages: Record<string, ForgeStage>; current?: string; live: boolean }) {
   return (
-    <div className="grid grid-cols-3 gap-1.5 md:grid-cols-6">
+    <div className="grid grid-cols-4 gap-1.5 md:grid-cols-7">
       {STAGES.map((s) => {
         const st = stages[s.id]?.status ?? "pending";
         const active = live && current === s.id;
@@ -411,6 +470,23 @@ function AlphaActions({ a, onOpen }: { a: ForgeAlpha; onOpen: (expr: string, s: 
         </button>
       </Tip>
       {a.id != null && (
+        <Tip content="Simulate on BRAIN itself (needs the BRAIN connection)">
+          <button
+            className="btn"
+            onClick={async () => {
+              try {
+                const r = await api.brain.simulate({ alpha_ids: [a.id!] });
+                toast.success(`Sent to BRAIN (job #${r.id})`);
+              } catch (e) {
+                toast.error(String((e as Error).message));
+              }
+            }}
+          >
+            <CloudUpload size={13} /> Run on BRAIN
+          </button>
+        </Tip>
+      )}
+      {a.id != null && (
         <button className="btn btn-ghost" onClick={() => nav(`/library?open=${a.id}`)}>
           <Library size={13} /> Library #{a.id}
         </button>
@@ -428,6 +504,8 @@ function ChampionCard({ a, result, onOpen }: { a: ForgeAlpha; result: ForgeResul
         <div className="flex items-center gap-2 border-b border-[var(--hairline)] bg-[var(--surface-2)] px-3 py-2">
           <Wand2 size={15} className="text-[var(--accent)]" />
           <span className="text-[13px] font-semibold">Champion alpha</span>
+          <GradeBadge grade={a.grade} />
+          {a.complex && <span className="chip">complex</span>}
           <StatusBadge status={a.status === "PASS" ? "PASS" : "FAIL"} label={a.status === "PASS" ? "passes all local checks" : `fails ${a.failed.join(", ")}`} compact />
           <span className="chip ml-auto">{a.family_label}</span>
           <Tip content="How recognisably the alpha still expresses your idea: the data you named, the mechanism, and no unrelated data">
@@ -435,7 +513,15 @@ function ChampionCard({ a, result, onOpen }: { a: ForgeAlpha; result: ForgeResul
           </Tip>
         </div>
         <div className="flex flex-col gap-3 p-3">
-          <div className="mono select-all break-words rounded-md border border-[var(--border)] bg-[var(--editor-bg)] px-3 py-2.5 text-[13px] leading-relaxed text-ink">{a.expr}</div>
+          <div className="mono select-all whitespace-pre-wrap break-words rounded-md border border-[var(--border)] bg-[var(--editor-bg)] px-3 py-2.5 text-[13px] leading-relaxed text-ink">{a.expr}</div>
+          {(a.quality_reasons?.length || a.quality_evidence?.length) ? (
+            <div className="flex flex-col gap-0.5 text-[11.5px]">
+              {a.quality_evidence && a.quality_evidence.length > 0 && <span className="text-[var(--good-text)]">✓ {a.quality_evidence.join(" · ")}</span>}
+              {(a.quality_reasons ?? []).slice(0, 3).map((x) => (
+                <span key={x} className="text-[var(--warn-text)]">• {x}</span>
+              ))}
+            </div>
+          ) : null}
           <div className="text-[11px] text-muted">
             decay {a.settings.decay} · {a.settings.neutralization.toLowerCase()} neutralization · truncation {a.settings.truncation} · {a.settings.universe} · delay {a.settings.delay}
           </div>
@@ -498,12 +584,13 @@ function AlphaRowCard({ title, a, note, onOpen }: { title: string; a: ForgeAlpha
     <div className="flex flex-col gap-1.5 py-2">
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-[12px] font-semibold">{title}</span>
+        <GradeBadge grade={a.grade} />
         <StatusBadge status={a.status === "PASS" ? "PASS" : "FAIL"} label={a.status === "PASS" ? "pass" : a.failed.join(", ")} compact />
         <span className="tnum ml-auto text-[11.5px] text-muted">
           Sharpe {fmt.num(a.sharpe)} · fitness {fmt.num(a.fitness)} · TO {fmt.pct(a.turnover, 0)} · OS {fmt.num(a.os_sharpe)}
         </span>
       </div>
-      <div className="mono break-words text-[11.5px] text-ink2">{a.expr}</div>
+      <div className="mono whitespace-pre-wrap break-words text-[11.5px] text-ink2">{a.expr}</div>
       {note && <div className="text-[11px] text-muted">{note}</div>}
       <div className="flex gap-1.5">
         <button className="btn !py-1" onClick={() => onOpen(a.expr, a.settings)}>
@@ -578,9 +665,15 @@ function ForgeRun({ job, onOpen }: { job: JobSnapshot; onOpen: (expr: string, s?
         </Card>
       ) : null}
 
-      {result && (result.faithful || result.runners.length > 0 || result.brain_only.length > 0) && (
+      {result && (result.faithful || result.runners.length > 0 || result.brain_only.length > 0 || result.simple || result.complex) && (
         <Card title="More from this forge">
           <div className="flex flex-col divide-y divide-[var(--hairline)]">
+            {result.simple && result.champion && result.simple.expr !== result.champion.expr && (
+              <AlphaRowCard title="Best simple (one-line) alpha" a={result.simple} note="The strongest single-expression version." onOpen={onOpen} />
+            )}
+            {result.complex && result.champion && result.complex.expr !== result.champion.expr && (
+              <AlphaRowCard title="Best complex (multi-statement) alpha" a={result.complex} note={result.complex.lineage[result.complex.lineage.length - 1] ?? "A composition of the leading signals."} onOpen={onOpen} />
+            )}
             {result.faithful && (
               <AlphaRowCard title="Most faithful variant" a={result.faithful} note="Uses everything your idea names, in the stated direction; it scored below the champion." onOpen={onOpen} />
             )}
@@ -628,6 +721,28 @@ export default function Forge() {
   const [starting, setStarting] = useState(false);
   const setStudio = useUI((s) => s.setStudio);
   const nav = useNavigate();
+  const { data: status } = useStatus();
+  const demo = status?.data?.source === "demo";
+  const [allowDemo, setAllowDemo] = useState(false);
+  const [reading, setReading] = useState(false);
+
+  const onFile = async (f: File | undefined) => {
+    if (!f) return;
+    setReading(true);
+    try {
+      if (TEXT_EXT.test(f.name) || f.type.startsWith("text/")) {
+        setText(await f.text());
+      } else {
+        const r = await api.forgeExtract(f.name, await fileToBase64(f));
+        setText(r.text);
+        toast.success(`Read ${f.name}: ${r.chars.toLocaleString()} characters${r.key_sentences.length ? `, ${r.key_sentences.length} key sentences` : ""}`);
+      }
+    } catch (e) {
+      toast.error(String((e as Error).message));
+    } finally {
+      setReading(false);
+    }
+  };
   const qc = useQueryClient();
   const liveJobs = useJobs((s) => s.jobs);
 
@@ -663,7 +778,7 @@ export default function Forge() {
     if (!text.trim() || starting) return;
     setStarting(true);
     try {
-      const r = await api.startJob("forge", { idea: text, effort, settings, families: families ?? undefined, horizon: horizon ?? undefined });
+      const r = await api.startJob("forge", { idea: text, effort, settings, families: families ?? undefined, horizon: horizon ?? undefined, allow_demo: allowDemo || undefined });
       toast.success(`Forging your idea (job #${r.id})`);
       setSelected(r.id);
       setParams({ job: String(r.id) });
@@ -691,9 +806,16 @@ export default function Forge() {
               className="input min-h-[112px] resize-y text-[13px] leading-relaxed"
               value={text}
               onChange={(e) => setText(e.target.value)}
-              placeholder="e.g. Stocks that drop sharply on heavy volume tend to bounce back within a week. Paste notes, a paper abstract or Fast Expressions."
+              placeholder="e.g. Stocks that drop sharply on heavy volume tend to bounce back within a week. Or paste notes, a paper, a formula (101-Alphas notation too), pandas code, JSON, a list of ideas or Fast Expressions."
               aria-label="Alpha idea"
             />
+            <div className="flex items-center gap-2">
+              <label className="btn cursor-pointer !py-1">
+                {reading ? <Spinner size={12} /> : <FileUp size={12} />} Open a file
+                <input type="file" className="hidden" accept=".pdf,.docx,.txt,.md,.html,.htm,.rtf,.ipynb,.py,.json,.yaml,.yml,.csv,.tex" onChange={(e) => onFile(e.target.files?.[0])} />
+              </label>
+              <span className="text-[10.5px] text-muted">PDF, Word, HTML, notebooks, code or text. Long documents are reduced to the sentences that state the idea.</span>
+            </div>
             <div className="flex flex-wrap gap-1">
               <span className="text-[10.5px] text-muted">Try:</span>
               {EXAMPLES.map((e) => (
@@ -715,6 +837,7 @@ export default function Forge() {
                   ))}
                 </div>
               </div>
+              {demo && <Toggle checked={allowDemo} onChange={setAllowDemo} label="Run on demo data anyway" />}
               <button className="btn btn-primary ml-auto" onClick={start} disabled={!text.trim() || starting}>
                 {starting ? <Spinner size={13} /> : <Sparkles size={13} />} Forge alpha <span className="opacity-70">Ctrl+Enter</span>
               </button>
@@ -778,7 +901,7 @@ export default function Forge() {
         ) : (
           <Card>
             <Empty title="Paste an idea and press Forge alpha">
-              The forge reads your idea, drafts dozens of Fast Expressions that implement it, screens them on the local simulator, blends and repairs the best, evolves them with genetic programming, and hands back a champion with BRAIN-ready settings. Nothing is sent to BRAIN.
+              The forge reads your idea, drafts dozens of Fast Expressions that implement it, screens them on the local simulator, blends and repairs the best, evolves them with genetic programming, composes complex multi-statement versions, and hands back graded champions (a simple and a complex one) with BRAIN-ready settings. Nothing is sent to BRAIN unless you press Run on BRAIN.
             </Empty>
           </Card>
         )}

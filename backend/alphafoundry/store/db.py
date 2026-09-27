@@ -54,11 +54,24 @@ CREATE TABLE IF NOT EXISTS jobs (
 );
 CREATE TABLE IF NOT EXISTS bandit (arm TEXT PRIMARY KEY, a REAL, b REAL, n INTEGER);
 CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT);
+CREATE TABLE IF NOT EXISTS brain_alphas (
+  brain_id TEXT PRIMARY KEY,
+  alpha_id INTEGER REFERENCES alphas(id) ON DELETE SET NULL,
+  expr TEXT, settings TEXT, status TEXT, stage TEXT, metrics TEXT, checks TEXT,
+  pnl BLOB, pnl_start TEXT, submitted INTEGER DEFAULT 0, date_created TEXT, fetched_at TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_brain_alphas_alpha ON brain_alphas(alpha_id);
 """
 
+# Columns added after the first release; created on start-up when an older database is opened.
+MIGRATIONS = {
+    "alphas": [("brain_alpha_id", "TEXT"), ("quality", "REAL"), ("grade", "TEXT"), ("data_source", "TEXT")],
+}
+
 ALPHA_METRIC_COLS = ("sharpe", "fitness", "turnover", "returns", "drawdown", "margin", "os_sharpe", "sub_sharpe",
-                     "max_corr", "pass_prob", "complexity")
-SORTABLE = set(ALPHA_METRIC_COLS) | {"id", "created_at", "updated_at", "status_local", "origin", "family"}
+                     "max_corr", "pass_prob", "complexity", "quality")
+SORTABLE = set(ALPHA_METRIC_COLS) | {"id", "created_at", "updated_at", "status_local", "origin", "family", "grade",
+                                     "status_brain"}
 
 
 def now() -> str:
@@ -88,6 +101,16 @@ class Store:
             self.conn.execute("PRAGMA busy_timeout=10000")
             self.conn.execute("PRAGMA foreign_keys=ON")
             self.conn.executescript(SCHEMA)
+            self._migrate()
+
+    def _migrate(self) -> None:
+        for table, cols in MIGRATIONS.items():
+            have = {r[1] for r in self.conn.execute(f"PRAGMA table_info({table})").fetchall()}
+            for name, decl in cols:
+                if name not in have:
+                    self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS ix_alphas_grade ON alphas(grade)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS ix_alphas_brain ON alphas(brain_alpha_id)")
 
     # ------------------------------------------------------------------ low level
     def q(self, sql: str, args: Iterable[Any] = ()) -> list[sqlite3.Row]:
@@ -183,8 +206,22 @@ class Store:
                     category: str = "", submitted: bool | None = None, starred: bool | None = None,
                     local: bool | None = None, min_sharpe: float | None = None, min_fitness: float | None = None,
                     tag: str = "", job_id: int | None = None, ids: list[int] | None = None,
+                    grade: str = "", brain: str = "", data_source: str = "",
                     sort: str = "fitness", desc: bool = True, limit: int = 200, offset: int = 0) -> dict:
         where, args = ["1=1"], []
+        if grade:
+            gs = [g.strip().upper() for g in grade.split(",") if g.strip()]
+            where.append(f"grade IN ({','.join('?' for _ in gs)})")
+            args += gs
+        if brain:
+            if brain == "tested":
+                where.append("status_brain IS NOT NULL AND status_brain NOT IN ('untested', '')")
+            else:
+                where.append("status_brain=?")
+                args.append(brain)
+        if data_source:
+            where.append("COALESCE(data_source, '')=?")
+            args.append(data_source)
         if search:
             where.append("(expr LIKE ? OR notes LIKE ? OR tags LIKE ?)")
             args += [f"%{search}%"] * 3
@@ -232,7 +269,8 @@ class Store:
         return {"total": total, "rows": [self._row(r) for r in rows]}
 
     def update_alpha(self, alpha_id: int, fields: dict) -> None:
-        allowed = {"tags", "notes", "submitted", "starred", "status_brain", "family", "description", "expr"}
+        allowed = {"tags", "notes", "submitted", "starred", "status_brain", "family", "description", "expr",
+                   "brain_alpha_id", "grade", "quality", "data_source"}
         sets, args = [], []
         for k, v in fields.items():
             if k not in allowed:
@@ -259,16 +297,18 @@ class Store:
 
     def stats(self) -> dict:
         r = self.q("SELECT COUNT(*) n, SUM(status_local='PASS') pass, SUM(submitted) sub, SUM(local=0) brain_only, "
-                   "SUM(starred) starred, MAX(fitness) best_fitness, MAX(sharpe) best_sharpe FROM alphas")[0]
+                   "SUM(starred) starred, MAX(fitness) best_fitness, MAX(sharpe) best_sharpe, "
+                   "SUM(grade='A') grade_a, SUM(grade='B') grade_b, SUM(data_source='demo') demo FROM alphas")[0]
         b = self.q("SELECT COUNT(*) n, SUM(passed) pass FROM brain_results")[0]
         return {"alphas": r["n"] or 0, "local_pass": r["pass"] or 0, "submitted": r["sub"] or 0,
                 "brain_only": r["brain_only"] or 0, "starred": r["starred"] or 0,
                 "best_fitness": r["best_fitness"], "best_sharpe": r["best_sharpe"],
+                "grade_a": r["grade_a"] or 0, "grade_b": r["grade_b"] or 0, "demo_mined": r["demo"] or 0,
                 "brain_imported": b["n"] or 0, "brain_passed": b["pass"] or 0}
 
     def facet_counts(self) -> dict:
         out = {}
-        for col in ("origin", "status_local", "idea", "category", "status_brain"):
+        for col in ("origin", "status_local", "idea", "category", "status_brain", "grade", "data_source"):
             out[col] = {(r[0] or "none"): r[1] for r in self.q(f"SELECT {col}, COUNT(*) FROM alphas GROUP BY {col}")}
         return out
 

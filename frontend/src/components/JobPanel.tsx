@@ -9,7 +9,7 @@ import { useJobs, useUI } from "../lib/store";
 import type { JobResultRow, JobSnapshot } from "../lib/types";
 import { GpProgressChart, ParetoScatter } from "./charts";
 import { ReengineerView } from "./Reengineer";
-import { Card, Empty, Kv, Progress, StatusBadge } from "./ui";
+import { Card, Empty, GradeBadge, Kv, Progress, StatusBadge } from "./ui";
 
 const LIVE = new Set(["running", "paused", "queued"]);
 
@@ -26,8 +26,9 @@ export function ResultsTable({ rows, height = 360 }: { rows: JobResultRow[]; hei
   if (!rows.length) return <Empty title="No saved results yet">Alphas that clear the save threshold stream in here as they are evaluated.</Empty>;
   return (
     <div>
-      <div className="grid grid-cols-[92px_60px_60px_56px_64px_52px_1fr] gap-2 border-b border-line px-2 py-1.5 text-[10.5px] font-semibold uppercase tracking-wide text-muted">
+      <div className="grid grid-cols-[92px_30px_60px_60px_56px_64px_52px_1fr] gap-2 border-b border-line px-2 py-1.5 text-[10.5px] font-semibold uppercase tracking-wide text-muted">
         <span>Status</span>
+        <span>Gr.</span>
         <span className="text-right">Sharpe</span>
         <span className="text-right">Fitness</span>
         <span className="text-right">TO</span>
@@ -47,11 +48,12 @@ export function ResultsTable({ rows, height = 360 }: { rows: JobResultRow[]; hei
                   else setStudio(r.expr);
                   nav("/studio");
                 }}
-                className="tnum absolute left-0 grid w-full grid-cols-[92px_60px_60px_56px_64px_52px_1fr] items-center gap-2 border-b border-line px-2 text-left text-[12px] hover:bg-[var(--surface-2)]"
+                className="tnum absolute left-0 grid w-full grid-cols-[92px_30px_60px_60px_56px_64px_52px_1fr] items-center gap-2 border-b border-line px-2 text-left text-[12px] hover:bg-[var(--surface-2)]"
                 style={{ top: it.start, height: it.size }}
                 title="Open in Studio"
               >
-                <StatusBadge status={r.status} compact />
+                <StatusBadge status={r.status} compact label={r.status_brain ? `BRAIN ${r.status_brain}` : undefined} />
+                <GradeBadge grade={r.grade} />
                 <span className="text-right">{fmt.num(r.sharpe)}</span>
                 <span className="text-right">{fmt.num(r.fitness)}</span>
                 <span className="text-right">{fmt.pct(r.turnover, 0)}</span>

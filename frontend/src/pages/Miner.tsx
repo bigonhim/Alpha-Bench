@@ -1,19 +1,21 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { BookMarked, CloudUpload, Dna, LayoutTemplate, ListChecks, Rocket, Shuffle, SlidersHorizontal, Sparkles, Wand2 } from "lucide-react";
+import { Blocks, BookMarked, Cloud, CloudUpload, Dna, LayoutTemplate, ListChecks, Rocket, Shuffle, SlidersHorizontal, Sparkles, Wand2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 import { JobPanel, jobStatusBadge } from "../components/JobPanel";
 import { RE_DEFAULTS, ReengineerOptions } from "../components/Reengineer";
 import { SettingsBar } from "../components/SettingsBar";
-import { Card, Empty, Field, Toggle } from "../components/ui";
+import { Card, Empty, Field, Select, Toggle } from "../components/ui";
 import { api } from "../lib/api";
 import { clsx, fmt } from "../lib/format";
+import { useStatus } from "../lib/hooks";
 import { DEFAULT_SETTINGS, useJobs } from "../lib/store";
 import type { Settings } from "../lib/types";
 
 const METHODS = [
-  { id: "automine", title: "Auto-Mine", icon: Sparkles, desc: "Bandit-steered loop: templates → screen → Doctor fixes → GP refinement. Saves passing, mutually decorrelated candidates." },
+  { id: "automine", title: "Auto-Mine", icon: Sparkles, desc: "Quality-driven loop: templates → screen → fitness shaping → Doctor → GP → complex composites. Saves graded, decorrelated alphas." },
+  { id: "compose", title: "Complex composites", icon: Blocks, desc: "Multi-statement alphas: blends, tilts, regime switches and horizon ensembles of your best decorrelated alphas." },
   { id: "gp", title: "Genetic programming", icon: Dna, desc: "NSGA-II over expression trees (fitness × novelty × simplicity) with islands and successive halving." },
   { id: "templates", title: "Template grid", icon: LayoutTemplate, desc: "Expand the idea-tagged template library over fields, windows, groups and settings." },
   { id: "grammar", title: "Random grammar", icon: Shuffle, desc: "Typed, unit-aware random expressions for wide exploration." },
@@ -22,6 +24,7 @@ const METHODS = [
   { id: "settings_opt", title: "Settings optimizer", icon: SlidersHorizontal, desc: "Robust decay × neutralization × truncation search for chosen library alphas." },
   { id: "brain_only", title: "BRAIN-only ideas", icon: CloudUpload, desc: "Candidates on data not available locally (news, options, social, imported fields) to test on BRAIN." },
   { id: "reengineer", title: "Re-engineer", icon: Wand2, desc: "Diagnose a weak alpha and rebuild it stage by stage into a strong one, with a step-by-step recipe and a holdout verdict." },
+  { id: "brain_mine", title: "BRAIN mining", icon: Cloud, desc: "BRAIN itself judges every candidate; near misses are repaired from BRAIN's own checks (needs the BRAIN connection)." },
 ] as const;
 
 const IDEAS = ["reversion", "momentum", "seasonality", "value", "quality", "growth", "accruals", "investment", "leverage", "liquidity", "pv_divergence", "volatility"];
@@ -58,6 +61,10 @@ export default function Miner() {
   const [cfg, setCfg] = useState<Record<string, any>>({});
   const [selected, setSelected] = useState<number | null>(params.get("job") ? Number(params.get("job")) : null);
   const qc = useQueryClient();
+  const nav = useNavigate();
+  const { data: status } = useStatus();
+  const demo = status?.data?.source === "demo";
+  const [allowDemo, setAllowDemo] = useState(false);
   const initialParams = useRef(params);
   const liveJobs = useJobs((s) => s.jobs);
   const { data } = useQuery({ queryKey: ["jobs"], queryFn: api.jobs, refetchInterval: 10_000 });
@@ -65,7 +72,8 @@ export default function Miner() {
   useEffect(() => {
     const params = initialParams.current;
     const defaults: Record<string, Record<string, any>> = {
-      automine: { time_limit_min: 20, target_candidates: 20, save_min_sharpe: 1.2, families: [], include_brain_only: false, round_size: 24, gp_every: 3 },
+      automine: { time_limit_min: 30, target_candidates: 10, target_grade: "A", save_min_grade: "B", save_min_sharpe: 1.0, families: [], include_brain_only: false, round_size: 24, gp_every: 3, compose: true, compose_every: 4 },
+      compose: { source: "library", min_grade: "B", min_sharpe: 1.0, max_components: 3, n: 30, save_min_grade: "B", exprs: "" },
       gp: { population: 60, generations: 15, islands: 2, max_depth: 6, time_limit_min: 30, min_sharpe: 1.25, min_fitness: 1.0, halving: true, seed_from_library: true, library_seeds: 10, pv_weight: 0.6, seed_exprs: "" },
       templates: { families: params.get("family") ? [params.get("family")] : [], per_template: 12, settings_per_expr: 2, max_candidates: 400, save_min_sharpe: 1.0 },
       grammar: { n: 300, max_depth: 4, save_min_sharpe: 1.0, randomize_settings: true, pv_weight: 0.6 },
@@ -86,7 +94,13 @@ export default function Miner() {
   const sel = jobs.find((j) => j.id === selected) || jobs[0];
 
   const start = async () => {
+    if (method === "brain_mine") {
+      nav("/brain");
+      return;
+    }
     const c: Record<string, any> = { ...cfg, settings };
+    if (allowDemo) c.allow_demo = true;
+    if (method === "compose") c.exprs = String(c.exprs || "").split("\n").filter((x: string) => x.trim());
     if ("pv_weight" in c) {
       c.category_weights = { pv: c.pv_weight, fundamental: Math.max(0, 1 - c.pv_weight) };
       delete c.pv_weight;
@@ -144,7 +158,16 @@ export default function Miner() {
                   <Num label="Round size" value={cfg.round_size ?? 24} onChange={set("round_size")} min={4} />
                   <Num label="GP every N rounds" value={cfg.gp_every ?? 3} onChange={set("gp_every")} min={1} />
                 </div>
+                <div className="flex flex-wrap gap-3">
+                  <Field label="Stop after this many alphas of grade" hint="A = BRAIN-ready (margins + robustness); B = passes every local check">
+                    <Select value={cfg.target_grade ?? "A"} onChange={set("target_grade")} options={[{ value: "A", label: "A (BRAIN-ready)" }, { value: "B", label: "A or B" }]} />
+                  </Field>
+                  <Field label="Save alphas graded at least">
+                    <Select value={cfg.save_min_grade ?? "B"} onChange={set("save_min_grade")} options={[{ value: "A", label: "A" }, { value: "B", label: "B (passes locally)" }, { value: "C", label: "C (keep near misses)" }]} />
+                  </Field>
+                </div>
                 <FamilyPicker value={cfg.families ?? []} onChange={set("families")} />
+                <Toggle checked={cfg.compose !== false} onChange={set("compose")} label="Build complex (multi-statement) composites from the good alphas it finds" />
                 <Toggle checked={!!cfg.include_brain_only} onChange={set("include_brain_only")} label="Also generate BRAIN-only ideas at the end" />
               </>
             )}
@@ -210,6 +233,27 @@ export default function Miner() {
                 <ReengineerOptions value={{ ...RE_DEFAULTS, ...cfg }} onChange={(v) => setCfg((c) => ({ ...c, ...v }))} />
               </>
             )}
+            {method === "compose" && (
+              <>
+                <div className="text-[12px] text-ink2">
+                  Picks weakly correlated alphas of different families from the Library (or the expressions you paste), then writes readable multi-statement programs: weighted blends (weights from their PnL), volume-gated blends, tilts, volatility regime switches, orthogonalized signals and multi-horizon ensembles. Each is screened, shaped for fitness and graded.
+                </div>
+                <div className="flex flex-wrap gap-3">
+                  <Field label="Library alphas of grade">
+                    <Select value={cfg.min_grade ?? "B"} onChange={set("min_grade")} options={[{ value: "A", label: "A" }, { value: "B", label: "A or B" }, { value: "C", label: "A to C" }]} />
+                  </Field>
+                  <Num label="Min component Sharpe" value={cfg.min_sharpe ?? 1} onChange={set("min_sharpe")} step={0.1} />
+                  <Num label="Parts per alpha" value={cfg.max_components ?? 3} onChange={set("max_components")} min={2} max={4} />
+                  <Num label="Composites to test" value={cfg.n ?? 30} onChange={set("n")} min={4} />
+                </div>
+                <Field label="Or paste component expressions (one per line, optional)">
+                  <textarea className="input mono h-20" value={cfg.exprs ?? ""} onChange={(e) => set("exprs")(e.target.value)} placeholder={"group_rank(ts_backfill(ebitda, 120) / enterprise_value, industry)\nrank(-ts_delta(close, 5))"} />
+                </Field>
+              </>
+            )}
+            {method === "brain_mine" && (
+              <div className="text-[12px] text-ink2">BRAIN mining runs from the BRAIN page, where you sign in, set the daily simulation budget and follow the results.</div>
+            )}
             {method === "brain_only" && (
               <div className="flex flex-wrap gap-3">
                 <Num label="Expansions / template" value={cfg.per_template ?? 6} onChange={set("per_template")} min={1} />
@@ -220,6 +264,14 @@ export default function Miner() {
               <div className="lbl mb-1.5">Base BRAIN settings</div>
               <SettingsBar settings={settings} onChange={(p) => setSettings((s) => ({ ...s, ...p }))} compact />
             </div>
+            {demo && method !== "brain_mine" && (
+              <div className="rounded-md border border-[var(--border)] bg-[var(--surface-2)] p-2 text-[12px] text-[var(--warn-text)]">
+                The active dataset is the synthetic demo. Mining on it finds planted effects that do not exist on BRAIN.
+                <div className="mt-1">
+                  <Toggle checked={allowDemo} onChange={setAllowDemo} label="Run on demo data anyway (to try the tool; results will not transfer)" />
+                </div>
+              </div>
+            )}
             <div className="flex justify-end">
               <button className="btn btn-primary" onClick={start}>
                 <Rocket size={13} /> Start {m.title}

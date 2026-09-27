@@ -16,7 +16,8 @@ from pathlib import Path
 
 import numpy as np
 
-UNIVERSE_SIZES = {"TOP100": 100, "TOP200": 200, "TOP500": 500, "TOP1000": 1000, "TOP1500": 1500}
+UNIVERSE_SIZES = {"TOP100": 100, "TOP200": 200, "TOP500": 500, "TOP1000": 1000, "TOP1500": 1500, "TOP2000": 2000,
+                  "TOP3000": 3000}
 
 
 class Panel:
@@ -88,6 +89,8 @@ class Panel:
             "groups": {k: len(v) for k, v in self.group_labels.items()},
             "universes": self.universes,
             "built": self.meta.get("built"),
+            "pool": self.meta.get("pool") or ("sp1500" if self.source == "real" else self.source),
+            "classification": self.meta.get("classification"),
         }
 
 

@@ -173,3 +173,23 @@ export function Select({ value, onChange, options, className, title }: { value: 
     </select>
   );
 }
+
+const GRADE: Record<string, { cls: string; label: string; hint: string }> = {
+  A: { cls: "bg-[var(--good-bg,#1f6f43)] text-white", label: "A", hint: "BRAIN-ready: passes every check with a safety margin and the robustness evidence holds" },
+  B: { cls: "bg-[var(--accent)] text-white", label: "B", hint: "Passes every local check, but with thin margins or one robustness warning" },
+  C: { cls: "bg-[var(--surface-3)] text-[var(--warn-text)]", label: "C", hint: "Near miss or weak evidence: refine it before sending it to BRAIN" },
+  D: { cls: "bg-[var(--surface-3)] text-muted", label: "D", hint: "Fails the checks" },
+};
+
+/** Quality grade chip: always a letter plus a tooltip, never color alone. */
+export function GradeBadge({ grade, className }: { grade?: string | null; className?: string }) {
+  if (!grade) return <span className={clsx("text-muted", className)}>—</span>;
+  const g = GRADE[grade] ?? GRADE.D;
+  return (
+    <Tip content={`Grade ${g.label}: ${g.hint}`}>
+      <span className={clsx("inline-flex h-[18px] w-[18px] items-center justify-center rounded text-[11px] font-bold", g.cls, className)} aria-label={`Quality grade ${g.label}`}>
+        {g.label}
+      </span>
+    </Tip>
+  );
+}

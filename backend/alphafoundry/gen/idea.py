@@ -290,6 +290,12 @@ class IdeaSpec:
     notes: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     confidence: float = 0.0
+    input_format: str = "english"
+    input_formats: list[str] = field(default_factory=list)
+    compiled: list[tuple[str, str]] = field(default_factory=list)   # (label, expression) from described formulas
+    sub_ideas: list[str] = field(default_factory=list)
+    key_sentences: list[str] = field(default_factory=list)
+    settings_hints: dict = field(default_factory=dict)
 
     @property
     def local_families(self) -> list[str]:
@@ -323,6 +329,9 @@ class IdeaSpec:
             "smooth": self.smooth, "interaction": self.interaction, "subset_families": self.subset_families,
             "seeds": self.seeds, "notes": self.notes, "warnings": self.warnings,
             "confidence": round(self.confidence, 2),
+            "input_format": self.input_format, "input_formats": self.input_formats,
+            "compiled": [{"label": lab, "expr": e} for lab, e in self.compiled], "sub_ideas": self.sub_ideas,
+            "key_sentences": self.key_sentences, "settings_hints": self.settings_hints,
         }
 
 
@@ -439,15 +448,39 @@ def match_templates(spec: IdeaSpec, local_fields: set[str] | None, limit: int = 
     return out[:limit]
 
 
+def _expr_fields(exprs: list[str]) -> list[str]:
+    out: list[str] = []
+    for e in exprs:
+        an = analyze(e)
+        if an.ok and an.node is not None:
+            out += [x.name for x in an.node.walk() if isinstance(x, Field) and x.name not in out]
+    return out
+
+
 def interpret(text: str, local_fields: set[str] | None = None) -> IdeaSpec:
+    from .ideaparse import parse_input, search_fields
+
     raw = text or ""
-    t = raw.lower().replace("’", "'").replace("–", "-").replace("—", " - ")
+    inp = parse_input(raw, local_fields)
     spec = IdeaSpec(text=raw.strip())
+    spec.input_format, spec.input_formats = inp.format, inp.formats
+    spec.compiled, spec.sub_ideas, spec.key_sentences = inp.compiled, inp.sub_ideas, inp.key_sentences
+    spec.settings_hints = inp.settings
+    # the lexicon reads the prose part (key sentences for long documents, JSON text for records)
+    lex = inp.text if inp.format not in ("english",) and inp.text else raw
+    t = lex.lower().replace("’", "'").replace("–", "-").replace("—", " - ")
     fm = field_map()
     sents = _sentences(t)
 
-    # ---- seeds: Fast Expressions pasted in the idea
-    spec.seeds = _find_seeds(raw, local_fields)
+    # ---- seeds: complete alphas found in the text (Fast Expressions, paper formulas, pandas code, JSON)
+    spec.seeds = list(inp.seeds)
+    seen_seed = {analyze(sd).canon_hash for sd in spec.seeds}
+    for sd in _find_seeds(raw, local_fields) if len(raw) < 20000 else []:
+        h = analyze(sd).canon_hash
+        if h not in seen_seed:
+            seen_seed.add(h)
+            spec.seeds.append(sd)
+    spec.seeds = spec.seeds[:8]
 
     # ---- families
     first_pos: dict[str, int] = {}
@@ -511,6 +544,8 @@ def interpret(text: str, local_fields: set[str] | None = None) -> IdeaSpec:
     for _, fid in sorted(mentions, key=lambda pm: pm[0]):
         if fid not in seen:
             seen.append(fid)
+    # data used by complete formulas and described computations counts as named data
+    seen += [f for f in _expr_fields([e for _, e in spec.compiled] + spec.seeds) if f not in seen]
     for fid in seen:
         if fid not in fm:
             continue
@@ -518,6 +553,16 @@ def interpret(text: str, local_fields: set[str] | None = None) -> IdeaSpec:
             spec.fields.append(fid)
         elif str(fm[fid].get("type", "MATRIX")) != "GROUP":
             spec.brain_fields.append(fid)
+    # BRAIN catalog data the text describes without naming ids (analyst revisions, news sentiment, ...)
+    if any(f.get("source_brain") for f in fm.values()):
+        for fid, sc in search_fields(lex, k=12, exclude=set(local or ())):
+            f = fm.get(fid, {})
+            if f.get("local") or str(f.get("type", "MATRIX")) == "GROUP" or fid in spec.brain_fields:
+                continue
+            if sc >= 0.5:
+                spec.brain_fields.append(fid)
+            if len(spec.brain_fields) >= 6:
+                break
 
     # ---- horizon and windows
     spec.windows = _explicit_windows(t)
@@ -565,11 +610,11 @@ def interpret(text: str, local_fields: set[str] | None = None) -> IdeaSpec:
         if "options" in spec.families:
             inferred.append("volatility")
             spec.notes.append("Option data only exists on BRAIN; locally, realized volatility stands in for it.")
-        for sd in spec.seeds[:1]:
+        for sd in spec.seeds[:2] + [e for _, e in spec.compiled[:3]]:
             fam = classify(analyze(sd).node)["idea"]  # type: ignore[arg-type]
-            if fam in FAMILY_LABEL and fam not in BRAIN_ONLY_FAMILIES:
+            if fam in FAMILY_LABEL and fam not in BRAIN_ONLY_FAMILIES and fam not in inferred:
                 inferred.append(fam)
-        if not inferred and not spec.seeds:
+        if not inferred and not spec.seeds and not spec.compiled:
             inferred = ["reversion", "momentum", "value", "quality"]
             spec.warnings.append("No specific mechanism recognised; exploring broad families. Naming the data "
                                  "(price, volume, earnings, debt...) and what should happen next sharpens the search.")
@@ -636,7 +681,17 @@ def interpret(text: str, local_fields: set[str] | None = None) -> IdeaSpec:
     conf += 0.15 if spec.horizon_stated else 0.0
     conf += 0.1 if spec.groups or spec.conditions else 0.0
     conf += 0.3 if spec.seeds else 0.0
+    conf += 0.25 if spec.compiled else 0.0
     spec.confidence = min(1.0, conf)
+    fmt_label = {"fastexpr": "Fast Expression", "paper": "paper / 101-Alphas notation", "python": "Python / pandas code",
+                 "json": "JSON record", "yaml": "YAML record", "list": "list of ideas", "document": "long document",
+                 "formula": "written formula", "mixed": "mixed text and code"}.get(spec.input_format)
+    if fmt_label:
+        spec.notes.insert(0, f"Read as: {fmt_label}")
+    spec.notes += [n for n in inp.notes if n not in spec.notes]
+    spec.warnings += inp.warnings
+    if spec.settings_hints:
+        spec.notes.append("Settings from your text: " + ", ".join(f"{k} {v}" for k, v in spec.settings_hints.items()))
     return spec
 
 
@@ -1083,18 +1138,35 @@ def synthesize(spec: IdeaSpec, local_fields: set[str], base: dict, budget: int =
     for sd in spec.seeds:
         for st in settings_for(fam0, spec, base)[:3]:
             seed_drafts.append(Draft(sd, st, fam0, "your expression", 1, "seed", None, "pv", _horizon_of(fam0, spec)))
-        if not normalized(sd):
+        if not normalized(sd) and ";" not in sd:
             seed_drafts.append(Draft(f"rank({sd})", settings_for(fam0, spec, base)[0], fam0,
                                      "your expression, ranked", 1, "seed", None, "pv", _horizon_of(fam0, spec)))
+    # computations the idea describes (written formulas, "12-month return skipping the last month", ...)
+    for label, ce in spec.compiled:
+        an = analyze(ce)
+        cfam = classify(an.node)["idea"] if an.ok and an.node is not None else fam0  # type: ignore[arg-type]
+        cfam = cfam if cfam in spec.families else fam0
+        sets = settings_for(cfam, spec, base)
+        cat = "fundamental" if cfam in FUNDAMENTAL_FAMILIES else "pv"
+        hz = _horizon_of(cfam, spec)
+        forms = [(ce, label)] if normalized(ce) else [(f"rank({ce})", f"{label}, ranked"),
+                                                      (f"group_rank({ce}, industry)", f"{label}, ranked within industry"),
+                                                      (ce, label)]
+        for k, (e, lab) in enumerate(forms):
+            seed_drafts.append(Draft(e, sets[k % len(sets)], cfam, lab, 1, "compiled", None, cat, hz))
 
     # allocate: seeds first, then families by weight, templates get ~20%
     out: list[Draft] = []
     seen: set[str] = set()
 
+    hints = {k: v for k, v in spec.settings_hints.items() if k in ("neutralization", "decay", "truncation")}
+
     def take(d: Draft) -> bool:
         an = analyze(d.expr, local_fields=local_fields)
         if not an.ok or not an.local:
             return False
+        if hints:  # settings the idea asked for win over the family defaults
+            d.settings = {**d.settings, **hints}
         k = an.canon_hash + "|" + str(sorted((k, str(v)) for k, v in d.settings.items()))
         if k in seen:
             return False

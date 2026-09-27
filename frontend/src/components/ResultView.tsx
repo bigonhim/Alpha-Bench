@@ -5,7 +5,7 @@ import { copyText } from "../lib/api";
 import { clsx, fmt } from "../lib/format";
 import type { Check, SimResult } from "../lib/types";
 import { PairChart, PnlChart, SeriesChart } from "./charts";
-import { Card, Kv, Spinner, StatusBadge, Tabs, Tip } from "./ui";
+import { Card, GradeBadge, Kv, Spinner, StatusBadge, Tabs, Tip } from "./ui";
 
 const HARD = new Set(["LOW_SHARPE", "LOW_FITNESS", "LOW_TURNOVER", "HIGH_TURNOVER", "CONCENTRATED_WEIGHT", "LOW_SUB_UNIVERSE_SHARPE", "SELF_CORRELATION"]);
 
@@ -318,6 +318,39 @@ export function BrainOnlyNotice({ r }: { r: SimResult }) {
         <Tip content="Save it to the library, then export the BRAIN simulation payload from the Library page.">
           <span className="cursor-help underline decoration-dotted">How do I test it?</span>
         </Tip>
+      </div>
+    </Card>
+  );
+}
+
+/** Quality grade: margins over BRAIN's thresholds plus evidence the edge is real (holdout, stability, sub-universe). */
+export function QualityCard({ r, loading }: { r: SimResult; loading?: boolean }) {
+  const q = r.quality;
+  if (!q) return null;
+  const title = { A: "BRAIN-ready", B: "Passes locally", C: "Near miss", D: "Fails" }[q.grade];
+  return (
+    <Card
+      title={
+        <span className="flex items-center gap-2">
+          <GradeBadge grade={q.grade} /> Quality: {title}
+        </span>
+      }
+      actions={loading ? <Spinner /> : <span className="tnum text-[11px] text-muted">score {fmt.num(q.score)}</span>}
+    >
+      <div className="flex flex-col gap-1.5 text-[12px]">
+        <div className="tnum text-ink2">
+          Sharpe at {Math.round(q.margins.sharpe * 100)}% and fitness at {Math.round(q.margins.fitness * 100)}% of BRAIN's minimum
+          <span className="text-muted"> (grade A asks for about 125%)</span>
+        </div>
+        {q.evidence.length > 0 && <div className="text-[var(--good-text)]">✓ {q.evidence.join(" · ")}</div>}
+        {q.reasons.map((x) => (
+          <div key={x} className="text-[var(--warn-text)]">
+            • {x}
+          </div>
+        ))}
+        {q.grade !== "A" && (
+          <div className="text-[11px] text-muted">Local results are a proxy. Run Doctor or the settings sweep to improve it, then confirm on BRAIN.</div>
+        )}
       </div>
     </Card>
   );

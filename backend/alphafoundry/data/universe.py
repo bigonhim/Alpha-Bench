@@ -1,9 +1,11 @@
-"""Universe pool: S&P 500 + 400 + 600 constituents (Wikipedia) with GICS labels and SEC CIKs."""
+"""Universe pool: S&P 500 + 400 + 600 constituents (Wikipedia) with GICS labels and SEC CIKs, optionally
+widened to every listed US common stock from SEC's exchange ticker file (the broad, TOP3000-like pool)."""
 
 from __future__ import annotations
 
 import io
 import json
+import re
 from pathlib import Path
 
 import httpx
@@ -90,3 +92,70 @@ def load_cached_universe(cache: Path) -> pd.DataFrame | None:
     if not cache.exists():
         return None
     return pd.DataFrame(json.loads(cache.read_text(encoding="utf-8")))
+
+
+# --------------------------------------------------------------------------- broad US pool (BRAIN TOP3000-like)
+
+SEC_TICKERS_EXCHANGE = "https://www.sec.gov/files/company_tickers_exchange.json"
+LISTED_EXCHANGES = {"NYSE", "NASDAQ", "NYSE AMERICAN", "NYSEAMERICAN", "AMEX", "NYSE MKT", "CBOE", "BATS", "NYSE ARCA"}
+FUND_NAME = re.compile(r"\b(?:ETF|ETN|FUND|FUNDS|ISHARES|SPDR|PROSHARES|INVESCO DB|DIREXION|VANECK|WISDOMTREE|"
+                       r"ACQUISITION CORP(?:ORATION)?|ACQUISITION CO\b|CAPITAL TRUST|MUNICIPAL|TRUST UNITS?|"
+                       r"CLOSED[- ]END|BDC\b|ROYALTY TRUST|NOTES DUE|DEPOSITARY)\b", re.I)
+
+
+def is_common_ticker(ticker: str, exchange: str) -> bool:
+    """Drop warrants, units, rights and preferreds by ticker convention (share classes like BRK-B are kept)."""
+    t = norm_ticker(ticker)
+    if not t or not re.fullmatch(r"[A-Z]{1,5}(?:-[A-Z])?", t):
+        return False  # e.g. BAC-PL, ABC-WT, XYZ-UN, tickers with digits
+    if "-" in t and t.split("-")[1] in ("U", "W", "R"):
+        return False
+    base = t.split("-")[0]
+    if len(base) == 5 and base[-1] in "WURZ" and "NASDAQ" in exchange.upper():
+        return False
+    return True
+
+
+def parse_exchange_file(js: dict) -> pd.DataFrame:
+    """SEC company_tickers_exchange.json -> DataFrame(ticker, name, cik, exchange) of listed common stocks."""
+    fields = [f.lower() for f in js.get("fields", [])]
+    rows = []
+    for rec in js.get("data", []):
+        d = dict(zip(fields, rec))
+        ex = str(d.get("exchange") or "").strip()
+        if ex.upper() not in LISTED_EXCHANGES:
+            continue
+        name = str(d.get("name") or "")
+        if FUND_NAME.search(name) or not is_common_ticker(str(d.get("ticker") or ""), ex):
+            continue
+        rows.append({"ticker": norm_ticker(d["ticker"]), "name": name, "cik": int(d["cik"]), "exchange": ex})
+    df = pd.DataFrame(rows, columns=["ticker", "name", "cik", "exchange"])
+    return df.drop_duplicates("ticker", keep="first").reset_index(drop=True)
+
+
+def fetch_broad_candidates(sec_user_agent: str, sp: pd.DataFrame, cache: Path | None = None) -> pd.DataFrame:
+    """All listed US common stocks from SEC, merged with the S&P 1500 table (which keeps its GICS labels)."""
+    with httpx.Client(timeout=60, headers={"User-Agent": sec_user_agent}, follow_redirects=True) as c:
+        r = c.get(SEC_TICKERS_EXCHANGE)
+        if r.status_code != 200:
+            raise RuntimeError(f"SEC returned HTTP {r.status_code} for the exchange ticker list (check the contact email)")
+        js = r.json()
+    return merge_broad(parse_exchange_file(js), sp, cache)
+
+
+def merge_broad(listed: pd.DataFrame, sp: pd.DataFrame, cache: Path | None = None) -> pd.DataFrame:
+    sp = sp.copy()
+    sp["gics"] = True
+    extra = listed[~listed["ticker"].isin(set(sp["ticker"]))].copy()
+    extra["sector"] = None
+    extra["industry"] = None
+    extra["subindustry"] = None
+    extra["index"] = "BROAD"
+    extra["gics"] = False
+    cols = ["ticker", "name", "sector", "industry", "subindustry", "cik", "index", "gics"]
+    df = pd.concat([sp[[c for c in cols if c in sp.columns]], extra[cols]], ignore_index=True)
+    df = df.drop_duplicates("ticker", keep="first").sort_values("ticker").reset_index(drop=True)
+    if cache is not None:
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(df.to_json(orient="records"), encoding="utf-8")
+    return df

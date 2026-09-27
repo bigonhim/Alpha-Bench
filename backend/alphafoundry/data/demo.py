@@ -146,15 +146,19 @@ def build_demo(root: Path, n_stocks: int = 300, n_days: int = 2000, seed: int = 
     return root
 
 
-def liquidity_universes(dates: list[str], dollar_adv: np.ndarray, N: int) -> dict[str, np.ndarray]:
-    """Monthly-rebalanced TOPn masks by trailing dollar volume; TOP1500 = the whole pool."""
+def liquidity_universes(dates: list[str], dollar_adv: np.ndarray, N: int,
+                        whole: str | None = "TOP1500") -> dict[str, np.ndarray]:
+    """Monthly-rebalanced TOPn masks by trailing dollar volume.
+
+    ``whole`` names the universe that is simply the whole pool (TOP1500 for the S&P 1500 pool). The broad pool
+    passes None when it is larger than 3000 names, so TOP3000 is a true top-3000 liquidity cut like BRAIN's."""
     T = len(dates)
     liq = np.nan_to_num(dollar_adv, nan=0.0)
     month = np.array([d[:7] for d in dates])
     reb = np.r_[True, month[1:] != month[:-1]]
     universes: dict[str, np.ndarray] = {}
     for uname, size_n in UNIVERSE_SIZES.items():
-        if size_n >= N or uname == "TOP1500":
+        if size_n >= N or uname == whole or (whole == "TOP1500" and size_n > 1500):
             continue
         mask = np.zeros((T, N), bool)
         cur = np.zeros(N, bool)
@@ -166,5 +170,6 @@ def liquidity_universes(dates: list[str], dollar_adv: np.ndarray, N: int) -> dic
                 cur[top] = liq[t, top] > 0
             mask[t] = cur
         universes[uname] = mask
-    universes["TOP1500"] = liq > 0
+    if whole:
+        universes[whole] = liq > 0
     return universes

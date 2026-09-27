@@ -37,6 +37,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "booksize": 20_000_000.0,
     "theme": "dark",
     "active_dataset": "auto",         # auto | real | demo
+    "universe_pool": "broad",         # broad (~3000 liquid US stocks, like BRAIN TOP3000) | sp1500 (faster)
+    "broad_pool_size": 3000,          # liquidity rank cut-off for the broad pool
+    "allow_demo_mining": False,       # mining on the synthetic demo panel produces alphas that cannot pass on BRAIN
 }
 
 _lock = threading.Lock()

@@ -69,9 +69,23 @@ async def lifespan(app: FastAPI):
     STATE["mgr"].shutdown()
 
 
-app = FastAPI(title="Alpha Foundry", version="1.0.0", default_response_class=ORJSON, lifespan=lifespan)
+app = FastAPI(title="Alpha Foundry", version="1.1.0", default_response_class=ORJSON, lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
                    allow_methods=["*"], allow_headers=["*"])
+
+
+def _include_routers() -> None:
+    from .brain_routes import router as brain_router
+
+    app.include_router(brain_router)
+    try:
+        from .idea_routes import router as idea_router
+    except ImportError:  # pragma: no cover - optional module
+        return
+    app.include_router(idea_router)
+
+
+_include_routers()
 
 
 # --------------------------------------------------------------------------- models
@@ -221,12 +235,13 @@ def doctor_ep(body: SimIn) -> dict:
 def list_alphas(search: str = "", status: str = "", origin: str = "", family: str = "", category: str = "",
                 submitted: bool | None = None, starred: bool | None = None, local: bool | None = None,
                 min_sharpe: float | None = None, min_fitness: float | None = None, tag: str = "",
-                job_id: int | None = None, sort: str = "fitness", desc: bool = True, limit: int = 200,
-                offset: int = 0) -> dict:
+                job_id: int | None = None, grade: str = "", brain: str = "", data_source: str = "",
+                sort: str = "fitness", desc: bool = True, limit: int = 200, offset: int = 0) -> dict:
     return ws_().store.list_alphas(search=search, status=status, origin=origin, family=family, category=category,
                                    submitted=submitted, starred=starred, local=local, min_sharpe=min_sharpe,
-                                   min_fitness=min_fitness, tag=tag, job_id=job_id, sort=sort, desc=desc,
-                                   limit=min(limit, 5000), offset=offset)
+                                   min_fitness=min_fitness, tag=tag, job_id=job_id, grade=grade, brain=brain,
+                                   data_source=data_source, sort=sort, desc=desc, limit=min(limit, 5000),
+                                   offset=offset)
 
 
 @app.get("/api/alphas/facets")
@@ -464,8 +479,8 @@ def bandit() -> list:
 def dashboard() -> dict:
     ws = ws_()
     st = ws.store
-    top = st.list_alphas(status="PASS", sort="pass_prob", limit=60)["rows"]
-    top.sort(key=lambda a: (-(a.get("robust") or 0), -(a.get("pass_prob") or 0)))
+    top = st.list_alphas(status="PASS", sort="quality", limit=60, data_source=ws.panel.source)["rows"]
+    top.sort(key=lambda a: ({"A": 0, "B": 1, "C": 2}.get(a.get("grade") or "", 3), -(a.get("quality") or 0)))
     top = top[:12]
     recent = st.list_alphas(sort="created_at", limit=8)["rows"]
     sub = st.list_alphas(submitted=True, limit=5000)["rows"]

@@ -4,9 +4,11 @@ Stages (selection uses the in-sample period only; the OS holdout is reported, ne
   interpret - read the idea (gen/idea.py)
   draft     - recipe, template and seed drafts built from the hypothesis
   combine   - cross-family blends, subset interactions, event gates, smoothing and size neutrality on the leaders
-  refine    - Doctor fixes for near-misses, then a robust decay x neutralization sweep on the leaders
+  refine    - Doctor fixes for near-misses, fitness shaping, then a robust decay x neutralization sweep on the leaders
+  compose   - complex (multi-statement) alphas: blends, tilts, regime switches and horizon ensembles of the leaders
   evolve    - NSGA-II genetic programming seeded with the leaders and restricted to the idea's data
-  polish    - full evaluation (sub-universe, stability, checks) of the finalists; champion + decorrelated runners-up
+  polish    - full evaluation (sub-universe, stability, checks, quality grade) of the finalists; champion, the best
+              simple and the best complex alpha, and decorrelated runners-up
 """
 
 from __future__ import annotations
@@ -21,26 +23,29 @@ import numpy as np
 from ..fastexpr import analyze, lower_text, to_expr
 from ..fastexpr.explain import classify
 from ..gen.build import CAPBUCKET_TEXT
+from ..gen.compose import Component, composites, is_complex
 from ..gen.doctor import diagnose
 from ..gen.gp import Individual
 from ..gen.idea import (FAMILY_LABEL, FUNDAMENTAL_FAMILIES, IdeaSpec, allowed_fields, apply_overrides, as_rank,
                         brain_only_drafts, fidelity, foreign_fields, interpret, missing_fields, synthesize)
+from ..gen.optimize import acceptable, shaping_variants
 from ..gen.templates import Candidate
 from ..sim.correlation import CorrelationIndex
+from ..sim.quality import quick_score as quality_quick_score
 from ..sim.robustness import robust_pick
 from ..sim.simulator import SimSettings
 from .manager import JobHandle, JobManager
-from .miners import _dates, _pnl, base_settings, persist, run_gp, score_result
+from .miners import _dates, _pnl, base_settings, persist, quality_of, run_gp, score_result
 
-STAGES = ("interpret", "draft", "combine", "refine", "evolve", "polish")
+STAGES = ("interpret", "draft", "combine", "refine", "compose", "evolve", "polish")
 
 EFFORT: dict[str, dict] = {
-    "quick": dict(draft=48, combine=16, refine_top=4, fixes_per=4, sweep_top=1, gp_population=24,
-                  gp_generations=4, gp_minutes=1.5, finalists=5, time_limit_min=4),
-    "standard": dict(draft=120, combine=36, refine_top=6, fixes_per=5, sweep_top=2, gp_population=40,
-                     gp_generations=8, gp_minutes=4.0, finalists=8, time_limit_min=10),
-    "deep": dict(draft=240, combine=64, refine_top=8, fixes_per=6, sweep_top=3, gp_population=64,
-                 gp_generations=16, gp_minutes=10.0, finalists=12, time_limit_min=25),
+    "quick": dict(draft=48, combine=16, refine_top=4, fixes_per=4, sweep_top=1, shape_top=2, compose=8,
+                  gp_population=24, gp_generations=4, gp_minutes=1.5, finalists=6, time_limit_min=5),
+    "standard": dict(draft=120, combine=36, refine_top=6, fixes_per=5, sweep_top=2, shape_top=3, compose=16,
+                     gp_population=40, gp_generations=8, gp_minutes=4.0, finalists=10, time_limit_min=12),
+    "deep": dict(draft=240, combine=64, refine_top=8, fixes_per=6, sweep_top=3, shape_top=5, compose=28,
+                 gp_population=64, gp_generations=16, gp_minutes=10.0, finalists=14, time_limit_min=28),
 }
 SWEEP_DECAYS = [0, 2, 4, 6, 8, 12]
 SWEEP_NEUTS = ["MARKET", "SECTOR", "INDUSTRY", "SUBINDUSTRY"]
@@ -217,6 +222,8 @@ class Forge:
         out = []
         for e, r in zip(entries, res):
             if r.get("ok") and self.admit(e, (r.get("metrics") or {}).get("is")):
+                if r.get("pnl_is"):
+                    e.extra["pnl"] = _pnl(r, "pnl_is")  # kept for composing complex alphas
                 out.append(e)
         self.h.update(leaderboard=self.leaderboard())
         return out
@@ -376,11 +383,74 @@ class Forge:
         self.h.update(leaderboard=self.leaderboard())
         return out
 
+    def shape(self, entries: list[Entry], stage: str, label: str) -> list[Entry]:
+        """Fitness shaping (turnover, peer ranking, weight profile, neutralization) of the leaders."""
+        cands: list[Entry] = []
+        for e in entries:
+            if e.extra.get("shaped") or not e.metrics:
+                continue
+            e.extra["shaped"] = True
+            try:
+                node = lower_text(e.expr)
+            except Exception:  # noqa: BLE001
+                continue
+            for sh in shaping_variants(node, e.settings, e.metrics, has_volume=self.has_volume, limit=12):
+                cands.append(e.child(to_expr(sh.node), f"Shaped: {sh.label}", stage, settings=sh.settings))
+        out = self.screen(self.fresh(cands), label)
+        cfg = self.ws.checks_cfg
+        # a shaped variant counts only if it keeps the Sharpe and adds no failing limit
+        for c in out:
+            parent = next((e for e in entries if c.lineage[:-1] == e.lineage), None)
+            if parent is not None and parent.metrics and not acceptable(c.metrics or {}, parent.metrics, cfg):
+                c.score -= 0.5
+        return out
+
     def stage_refine(self) -> None:
         self.begin("refine")
         out = self.doctor(self.leaders(int(self.cfg["refine_top"])), "refine", "Refine (Doctor)")
+        if self.can_run():
+            out += self.shape(self.leaders(int(self.cfg["shape_top"])), "refine", "Refine (fitness shaping)")
         out += self.sweep(self.leaders(int(self.cfg["sweep_top"])), "refine", "Refine")
         self.end("refine", out)
+
+    def stage_compose(self) -> None:
+        """Complex alphas: multi-statement programs built from the leaders of different mechanisms/cores."""
+        self.begin("compose")
+        picks: list[Entry] = []
+        fams_seen: set[str] = set()
+        for e in sorted(self.pool.values(), key=lambda e: -e.score):
+            if e.sign < 0 or e.extra.get("foreign") or e.extra.get("pnl") is None or is_complex(e.expr):
+                continue
+            if e.origin in ("combo", "compose", "gp") or (analyze(e.expr).size or 0) > 16:
+                continue  # compose single, readable signals; blends of blends overfit and read badly
+            if e.family not in fams_seen or (len(picks) < 4 and all(p.canon != e.canon for p in picks)
+                                             and len([p for p in picks if p.family == e.family]) < 2):
+                fams_seen.add(e.family)
+                picks.append(e)
+            if len(picks) >= 5:
+                break
+        comps = [Component(e.expr, e.family, e.settings, float((e.metrics or {}).get("sharpe") or 0.0),
+                           pnl=np.asarray(e.extra["pnl"], dtype=np.float64)) for e in picks]
+        if not comps:
+            self.skip("compose", "no simulated leaders to compose")
+            return
+        L = min(len(c.pnl) for c in comps)  # type: ignore[arg-type]
+        C = np.eye(len(comps))
+        if len(comps) > 1 and L >= 60:
+            with np.errstate(invalid="ignore", divide="ignore"):
+                C = np.nan_to_num(np.corrcoef(np.vstack([c.pnl[-L:] for c in comps])))  # type: ignore[index]
+        progs = composites(comps, C, local_fields=self.local, has_volume=self.has_volume,
+                           limit=int(self.cfg["compose"]))
+        cands: list[Entry] = []
+        for p in progs:
+            head = next((e for e in picks if e.expr == p.parts[0].expr), picks[0])
+            neut = str(head.settings.get("neutralization", self.base.get("neutralization", "SUBINDUSTRY")))
+            cands.append(head.child(p.text, f"Composed ({p.structure}): {p.label}", "compose",
+                                    settings={**head.settings, "decay": 0, "neutralization": neut}, origin="compose"))
+        out = self.screen(self.fresh(cands), "Compose")
+        if out and self.can_run():
+            out += self.sweep(sorted(out, key=lambda e: -e.score)[:1], "compose", "Compose")
+        self.end("compose", out)
 
     def stage_evolve(self) -> None:
         self.begin("evolve")
@@ -442,6 +512,13 @@ class Forge:
         faithful = max((e for e in on_dir if e.fidelity >= top_fid - 1e-9), key=lambda e: e.score, default=None)
         if faithful is not None and faithful not in finalists:
             finalists.append(faithful)
+        # the result always offers a simple (one-line) and a complex (multi-statement) alpha when both exist
+        for want_complex in (False, True):
+            if not any(is_complex(e.expr) == want_complex for e in finalists):
+                best = max((e for e in self.pool.values() if is_complex(e.expr) == want_complex and e.sign >= 0
+                            and e.fidelity >= min_fid), key=lambda e: e.score, default=None)
+                if best is not None:
+                    finalists.append(best)
         self.h.update(phase=f"Polish: full evaluation of {len(finalists)} finalists", done=0, total=len(finalists))
         res = self.mgr.evaluate(self.h, [{"expr": e.expr, "settings": e.settings, "extras": True} for e in finalists],
                                 "full", on_result=lambda i, r: self.h.update(done=self.h.progress.get("done", 0) + 1))
@@ -450,13 +527,11 @@ class Forge:
             if not r.get("ok"):
                 continue
             checks, pass_prob, failed_hard = score_result(self.ws, r)
-            ex = r.get("extras") or {}
-            stab = ex.get("stability")
-            size = int(r.get("size") or 0)
-            final = e.score + (0.8 if checks["status"] == "PASS" else -0.3 * failed_hard) + 0.3 * pass_prob
-            if stab is not None:
-                final += 0.4 * _clip(stab, 0, 1.2)
-            final -= 0.015 * max(0, size - 14)
+            qual = quality_of(self.ws, r, checks)
+            e.extra["quality"] = qual
+            # quality (margins + robustness evidence) decides; fidelity keeps the result on the idea
+            final = qual["score"] + {"A": 1.0, "B": 0.5, "C": 0.0, "D": -0.5}[qual["grade"]]
+            final += 0.8 * e.fidelity + 0.2 * pass_prob
             scored.append((final, e, r, checks, pass_prob))
         scored.sort(key=lambda t: -t[0])
         if not scored:
@@ -494,9 +569,17 @@ class Forge:
         faithful_summary = None
         if faith is not None:
             faithful_summary = next((s for s, t in zip(summaries, chosen) if t is faith), None) or save(faith, [])
+        kinds: dict[str, dict | None] = {}
+        for label, want_complex in (("simple", False), ("complex", True)):
+            t = next((t for t in scored if is_complex(t[1].expr) == want_complex), None)
+            if t is None:
+                kinds[label] = None
+                continue
+            kinds[label] = next((s for s, c in zip(summaries, chosen) if c is t), None) or \
+                save(t, [f"forge-{label}"])
         self.end("polish", [t[1] for t in chosen])
         return {"champion": summaries[0] if summaries else None, "runners": summaries[1:],
-                "faithful": faithful_summary}
+                "faithful": faithful_summary, "simple": kinds["simple"], "complex": kinds["complex"]}
 
     def _summary(self, final: float, e: Entry, r: dict, checks: dict, pp: float, row: dict | None) -> dict:
         m = (r.get("metrics") or {}).get("is") or {}
@@ -514,6 +597,11 @@ class Forge:
             "expected_brain_sharpe": self.ws.cal.expected_brain_sharpe(m.get("sharpe") or 0.0),
             "complexity": r.get("size"), "sign": e.sign, "foreign": e.extra.get("foreign", []),
             "missing": missing_fields(set(re.findall(r"[a-z_][a-z_0-9]*", e.expr)), self.spec),
+            "grade": (e.extra.get("quality") or {}).get("grade"),
+            "quality": (e.extra.get("quality") or {}).get("score"),
+            "quality_reasons": (e.extra.get("quality") or {}).get("reasons", []),
+            "quality_evidence": (e.extra.get("quality") or {}).get("evidence", []),
+            "complex": is_complex(e.expr),
         }
 
     def hypothesis(self) -> dict:
@@ -565,7 +653,7 @@ class Forge:
                             "locally. Check the Data page, or name price/volume/fundamental data in the idea."})
             return
         for name, fn in (("combine", self.stage_combine), ("refine", self.stage_refine),
-                         ("evolve", self.stage_evolve)):
+                         ("compose", self.stage_compose), ("evolve", self.stage_evolve)):
             h.check()
             if self.can_run():
                 fn()
@@ -582,6 +670,12 @@ class Forge:
                 notes.append("The best candidate does not yet pass every local BRAIN check "
                              f"({', '.join(champ['failed']) or 'see warnings'}). Try the Deep effort, add detail to "
                              "the idea, or open it in Studio and run Doctor.")
+            elif champ.get("grade") not in ("A", None):
+                why = "; ".join(champ.get("quality_reasons", [])[:2])
+                notes.append(f"Quality grade {champ['grade']}: it passes locally but not with the safety margin "
+                             f"that usually survives BRAIN ({why}). Verify it on BRAIN before relying on it.")
+            if self.ws.panel.source == "demo":
+                notes.append("These results come from the synthetic DEMO data and will not transfer to BRAIN.")
             if champ["sign"] < 0:
                 notes.append("The champion trades the reverse of the direction in your idea because the data "
                              "favours it (see the hypothesis check).")

@@ -49,7 +49,19 @@ FLOW = {
     "rd_expense": ["ResearchAndDevelopmentExpense"],
     "sga_expense": ["SellingGeneralAndAdministrativeExpense"],
     "da": ["DepreciationDepletionAndAmortization", "DepreciationAndAmortization", "Depreciation"],
+    "interest_expense": ["InterestExpense", "InterestExpenseDebt", "InterestExpenseNonoperating"],
+    "income_tax": ["IncomeTaxExpenseBenefit"],
+    "pretax_income": ["IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest",
+                      "IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethod"
+                      "Investments"],
+    "cashflow_invst": ["NetCashProvidedByUsedInInvestingActivities",
+                       "NetCashProvidedByUsedInInvestingActivitiesContinuingOperations"],
+    "cashflow_fin": ["NetCashProvidedByUsedInFinancingActivities",
+                     "NetCashProvidedByUsedInFinancingActivitiesContinuingOperations"],
+    "cashflow_dividends": ["PaymentsOfDividends", "PaymentsOfDividendsCommonStock"],
+    "buyback": ["PaymentsForRepurchaseOfCommonStock"],
 }
+EXTRACT_VERSION = 2  # bump when the concept lists change so cached extractions are refreshed
 EPS = ["EarningsPerShareDiluted", "EarningsPerShareBasic"]
 SHARES_DEI = ["EntityCommonStockSharesOutstanding"]
 SHARES_GAAP = ["CommonStockSharesOutstanding"]
@@ -168,7 +180,8 @@ def download_all(ciks: list[int], raw_dir: Path, user_agent: str, concurrency: i
                 if path.exists():
                     try:
                         cached = json.loads(path.read_text(encoding="utf-8"))
-                        if (today - dt.date.fromisoformat(cached.get("fetched", "1970-01-01"))).days <= max_age_days:
+                        fresh = (today - dt.date.fromisoformat(cached.get("fetched", "1970-01-01"))).days
+                        if fresh <= max_age_days and int(cached.get("v", 1)) >= EXTRACT_VERSION:
                             data = cached
                     except (OSError, ValueError):
                         data = None
@@ -197,7 +210,7 @@ def download_all(ciks: list[int], raw_dir: Path, user_agent: str, concurrency: i
                         await asyncio.sleep(delay)
                         delay = min(20.0, delay * 2)
                     if facts is not None:
-                        data = {"fetched": today.isoformat(), "series": extract(facts)}
+                        data = {"fetched": today.isoformat(), "v": EXTRACT_VERSION, "series": extract(facts)}
                         path.write_text(json.dumps(data), encoding="utf-8")
                     elif path.exists():
                         try:
@@ -206,6 +219,84 @@ def download_all(ciks: list[int], raw_dir: Path, user_agent: str, concurrency: i
                             data = None
                 if data is not None:
                     out[cik] = data["series"]
+                done += 1
+                if progress:
+                    progress(done, len(ciks), str(cik))
+
+            await asyncio.gather(*(one(c) for c in ciks))
+
+    asyncio.run(run())
+    return out
+
+
+SUBMISSIONS = "https://data.sec.gov/submissions/CIK{cik:010d}.json"
+
+
+def submissions_meta(js: dict) -> dict:
+    """The classification part of a submissions record (the filing history is not kept)."""
+    sic = str(js.get("sic") or "").strip()
+    return {"sic": int(sic) if sic.isdigit() else None, "sicDescription": js.get("sicDescription") or "",
+            "entityType": js.get("entityType") or "", "exchanges": js.get("exchanges") or [],
+            "tickers": js.get("tickers") or [], "name": js.get("name") or ""}
+
+
+def fetch_submissions_meta(ciks: list[int], raw_dir: Path, user_agent: str, concurrency: int = 4,
+                           rate_per_s: float = 8.0, max_age_days: int = 30,
+                           progress: Callable[[int, int, str], None] | None = None,
+                           cancelled: Callable[[], bool] | None = None) -> dict[int, dict]:
+    """SIC code and entity type for each CIK (SEC submissions API, cached per CIK, under 10 requests/s)."""
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    out: dict[int, dict] = {}
+    today = dt.date.today()
+    min_gap = 1.0 / rate_per_s
+
+    async def run():
+        sem = asyncio.Semaphore(concurrency)
+        last = [0.0]
+        lock = asyncio.Lock()
+        headers = {"User-Agent": user_agent, "Accept-Encoding": "gzip, deflate", "Host": "data.sec.gov"}
+        async with httpx.AsyncClient(timeout=60, headers=headers) as client:
+            done = 0
+
+            async def one(cik: int):
+                nonlocal done
+                if cancelled and cancelled():
+                    return
+                path = raw_dir / f"{cik}.json"
+                meta = None
+                if path.exists():
+                    try:
+                        cached = json.loads(path.read_text(encoding="utf-8"))
+                        if (today - dt.date.fromisoformat(cached.get("fetched", "1970-01-01"))).days <= max_age_days:
+                            meta = cached
+                    except (OSError, ValueError):
+                        meta = None
+                if meta is None:
+                    delay = 1.0
+                    for _ in range(5):
+                        async with sem:
+                            async with lock:
+                                wait = last[0] + min_gap - time.monotonic()
+                                if wait > 0:
+                                    await asyncio.sleep(wait)
+                                last[0] = time.monotonic()
+                            try:
+                                r = await client.get(SUBMISSIONS.format(cik=cik))
+                            except httpx.HTTPError:
+                                r = None
+                        if r is not None and r.status_code == 200:
+                            try:
+                                meta = {**submissions_meta(r.json()), "fetched": today.isoformat()}
+                                path.write_text(json.dumps(meta), encoding="utf-8")
+                            except ValueError:
+                                meta = None
+                            break
+                        if r is not None and r.status_code == 404:
+                            break
+                        await asyncio.sleep(delay)
+                        delay = min(20.0, delay * 2)
+                if meta is not None:
+                    out[cik] = meta
                 done += 1
                 if progress:
                     progress(done, len(ciks), str(cik))

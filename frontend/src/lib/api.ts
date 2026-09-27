@@ -1,4 +1,4 @@
-import type { Alpha, Analysis, Catalog, IdeaSpec, JobSnapshot, ReReport, Settings, SimResult, Status } from "./types";
+import type { Alpha, Analysis, BrainStatus, Quality, Catalog, IdeaSpec, JobSnapshot, ReReport, Settings, SimResult, Status } from "./types";
 
 async function req<T>(method: string, url: string, body?: unknown): Promise<T> {
   const res = await fetch(url, {
@@ -36,6 +36,9 @@ export interface ListParams {
   min_fitness?: number;
   tag?: string;
   job_id?: number;
+  grade?: string;
+  brain?: string;
+  data_source?: string;
   sort?: string;
   desc?: boolean;
   limit?: number;
@@ -68,7 +71,7 @@ export const api = {
   simulate: (text: string, settings: Partial<Settings>, extras = false) =>
     post<SimResult>("/api/simulate", { text, settings, extras }),
   extras: (text: string, settings: Partial<Settings>) =>
-    post<{ ok: boolean; extras: any; checks: any; pass_prob: number }>("/api/extras", { text, settings }),
+    post<{ ok: boolean; extras: any; checks: any; pass_prob: number; quality?: Quality }>("/api/extras", { text, settings }),
   doctor: (text: string, settings: Partial<Settings>) =>
     post<{ ok: boolean; fixes: DoctorFix[]; base_failed: string[]; base_warnings: string[]; base_metrics: any; base?: any }>(
       "/api/doctor",
@@ -138,7 +141,31 @@ export const api = {
   bandit: () => get<any[]>("/api/bandit"),
   forgeInterpret: (text: string, opts: { families?: string[]; horizon?: string; settings?: Partial<Settings> } = {}) =>
     post<IdeaSpec>("/api/forge/interpret", { text, ...opts }),
+  forgeExtract: (name: string, data_b64: string) =>
+    post<{ text: string; chars: number; format: string; formats: string[]; key_sentences: string[]; truncated: boolean }>("/api/forge/extract", { name, data_b64 }),
+  brain: {
+    status: () => get<BrainStatus>("/api/brain/status"),
+    login: (email: string, password: string, remember: boolean) => post<BrainStatus>("/api/brain/login", { email, password, remember }),
+    completePersona: () => post<BrainStatus>("/api/brain/persona/complete"),
+    logout: (forget = false) => post<BrainStatus>("/api/brain/logout", { forget }),
+    settings: (u: Record<string, unknown>) => post<any>("/api/brain/settings", u),
+    datasets: () => get<{ datasets: any[]; scope: any; synced: string | null; imported_fields: Record<string, number> }>("/api/brain/datasets"),
+    syncFields: (cfg: Record<string, unknown>) => post<{ ok: boolean; id: number }>("/api/brain/sync/fields", cfg),
+    syncAlphas: (cfg: Record<string, unknown>) => post<{ ok: boolean; id: number }>("/api/brain/sync/alphas", cfg),
+    simulate: (cfg: { alpha_ids?: number[]; exprs?: string[]; settings?: Partial<Settings>; check?: boolean }) =>
+      post<{ ok: boolean; id: number }>("/api/brain/simulate", cfg),
+    mine: (cfg: Record<string, unknown>) => post<{ ok: boolean; id: number }>("/api/brain/mine", cfg),
+    alpha: (id: number) => get<{ rows: any[] }>(`/api/brain/alpha/${id}`),
+  },
 };
+
+export async function fileToBase64(f: File): Promise<string> {
+  const buf = new Uint8Array(await f.arrayBuffer());
+  let bin = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < buf.length; i += chunk) bin += String.fromCharCode(...buf.subarray(i, i + chunk));
+  return btoa(bin);
+}
 
 export async function copyText(t: string): Promise<void> {
   try {

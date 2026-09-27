@@ -10,6 +10,7 @@ const Forge = lazy(() => import("./pages/Forge"));
 const Miner = lazy(() => import("./pages/Miner"));
 const Library = lazy(() => import("./pages/Library"));
 const ImportPage = lazy(() => import("./pages/ImportPage"));
+const BrainPage = lazy(() => import("./pages/BrainPage"));
 const Explorer = lazy(() => import("./pages/Explorer"));
 const DataPage = lazy(() => import("./pages/DataPage"));
 const SettingsPage = lazy(() => import("./pages/SettingsPage"));
@@ -24,6 +25,7 @@ export default function App() {
           <Route path="/forge" element={<Forge />} />
           <Route path="/miner" element={<Miner />} />
           <Route path="/library" element={<Library />} />
+          <Route path="/brain" element={<BrainPage />} />
           <Route path="/import" element={<ImportPage />} />
           <Route path="/explorer" element={<Explorer />} />
           <Route path="/data" element={<DataPage />} />

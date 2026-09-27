@@ -22,9 +22,11 @@ from ..engine.panel import UNIVERSE_SIZES, Panel
 from ..fastexpr.ast import Node
 from ..fastexpr.lower import lookback_of
 
-BRAIN_UNIVERSE_TO_LOCAL = {"TOP3000": "TOP1500", "TOP2000": "TOP1500", "TOP1000": "TOP1000", "TOP500": "TOP500",
+BRAIN_UNIVERSE_TO_LOCAL = {"TOP3000": "TOP3000", "TOP2000": "TOP2000", "TOP1000": "TOP1000", "TOP500": "TOP500",
                            "TOPSP500": "TOP500", "TOP200": "TOP200", "TOP100": "TOP100"}
-SUB_UNIVERSE = {"TOP1500": "TOP500", "TOP1000": "TOP500", "TOP500": "TOP200", "TOP200": "TOP100"}
+# a panel without the wanted universe falls back to the largest one it has (TOP1500 on the S&P 1500 pool)
+SUB_UNIVERSE = {"TOP3000": "TOP1000", "TOP2000": "TOP1000", "TOP1500": "TOP500", "TOP1000": "TOP500",
+                "TOP500": "TOP200", "TOP200": "TOP100"}
 NEUTRALIZATIONS_LOCAL = ("NONE", "MARKET", "SECTOR", "INDUSTRY", "SUBINDUSTRY")
 NEUTRALIZATIONS_ALL = NEUTRALIZATIONS_LOCAL + ("COUNTRY", "STATISTICAL", "CROWDING", "FAST", "SLOW", "SLOW_AND_FAST",
                                                "REVERSION_AND_MOMENTUM")

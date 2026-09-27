@@ -59,6 +59,11 @@ class JobCancelled(Exception):
     pass
 
 
+# jobs that generate or tune alphas from the local panel (blocked on the synthetic demo data by default)
+MINING_KINDS = {"automine", "gp", "templates", "grammar", "alpha101", "forge", "reengineer", "compose",
+                "settings_opt"}
+
+
 class JobHandle:
     def __init__(self, manager: "JobManager", job_id: int, kind: str, config: dict):
         self.m = manager
@@ -233,12 +238,26 @@ class JobManager:
         return [r if r is not None else {"ok": False, "error": "not evaluated"} for r in results]
 
     # ------------------------------------------------------------------ jobs
+    def demo_guard(self, kind: str, config: dict) -> None:
+        """Refuse to mine on the synthetic demo panel: its planted effects do not exist on BRAIN."""
+        import os
+
+        if kind not in MINING_KINDS or getattr(self.ws.panel, "source", "real") != "demo":
+            return
+        if config.get("allow_demo") or self.ws.settings.get("allow_demo_mining") \
+                or os.environ.get("ALPHAFOUNDRY_ALLOW_DEMO_MINING") == "1":
+            return
+        raise ValueError("The active dataset is the synthetic DEMO panel. Alphas mined on it come from effects "
+                         "planted in the demo generator and will not pass on BRAIN. Build real data on the Data "
+                         "page first (or tick 'run on demo data anyway' to try the tool).")
+
     def start(self, kind: str, config: dict) -> int:
         from . import miners
 
         fn = miners.JOB_KINDS.get(kind)
         if fn is None:
             raise ValueError(f"unknown job kind '{kind}'")
+        self.demo_guard(kind, config)
         job_id = self.ws.store.create_job(kind, config)
         h = JobHandle(self, job_id, kind, config)
         self.jobs[job_id] = h

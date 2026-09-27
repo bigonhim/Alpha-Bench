@@ -1,13 +1,13 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { Braces, Copy, Dna, Download, FlaskConical, Grid3x3, Layers, SlidersHorizontal, Star, Trash2, Upload, Wand2, X } from "lucide-react";
+import { Blocks, Braces, CloudUpload, Copy, Dna, Download, ExternalLink, FlaskConical, Grid3x3, Layers, SlidersHorizontal, Star, Trash2, Upload, Wand2, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 import { ComboChart, Heatmap } from "../components/charts";
-import { ChartsCard, ChecksList, DescriptionCard, MetricStrip, RobustnessCard } from "../components/ResultView";
-import { Card, Empty, Kv, Modal, Select, Spinner, StatusBadge, Toggle } from "../components/ui";
+import { ChartsCard, ChecksList, DescriptionCard, MetricStrip, QualityCard, RobustnessCard } from "../components/ResultView";
+import { Card, Empty, GradeBadge, Kv, Modal, Select, Spinner, StatusBadge, Toggle } from "../components/ui";
 import { api, copyText, downloadText, type ListParams } from "../lib/api";
 import { useDebounced } from "../lib/hooks";
 import { clsx, fmt, settingsLabel } from "../lib/format";
@@ -16,7 +16,7 @@ import type { Alpha } from "../lib/types";
 import { brainPayload } from "./Studio";
 import { startReengineer } from "../components/Reengineer";
 
-const COLS = "28px 22px 52px 92px 58px 58px 52px 60px 58px 58px 52px 48px 92px 80px 1fr";
+const COLS = "28px 22px 52px 92px 38px 58px 58px 52px 60px 58px 58px 52px 48px 92px 80px 1fr";
 
 function ExportModal({ ids, open, onOpenChange }: { ids: number[]; open: boolean; onOpenChange: (o: boolean) => void }) {
   const [format, setFormat] = useState("json");
@@ -64,7 +64,7 @@ function ExportModal({ ids, open, onOpenChange }: { ids: number[]; open: boolean
         {loading && <Spinner />}
       </div>
       <textarea className="input mono h-[52vh] w-full text-[11.5px]" readOnly value={text} />
-      <div className="mt-1 text-[11px] text-muted">Alpha Foundry never contacts BRAIN. Paste these into BRAIN, or feed the JSON to your own multi-simulation workflow.</div>
+      <div className="mt-1 text-[11px] text-muted">Paste these into BRAIN, or use Run on BRAIN in the Library when the BRAIN connection is set up.</div>
     </Modal>
   );
 }
@@ -121,6 +121,37 @@ function CombineModal({ ids, open, onOpenChange }: { ids: number[]; open: boolea
   );
 }
 
+function BrainRows({ id }: { id: number }) {
+  const { data } = useQuery({ queryKey: ["brain-alpha", id], queryFn: () => api.brain.alpha(id), staleTime: 30_000 });
+  const rows = data?.rows ?? [];
+  if (!rows.length) return null;
+  return (
+    <Card title="Results on BRAIN">
+      {rows.map((b: any) => {
+        const m = b.metrics?.is ?? {};
+        const chk = b.metrics?.check;
+        const failed = (b.checks ?? []).filter((c: any) => c.result === "FAIL" || c.result === "ERROR").map((c: any) => c.name);
+        return (
+          <div key={b.brain_id} className="border-b border-line py-1.5 text-[12px] last:border-0">
+            <div className="flex items-center justify-between gap-2">
+              <StatusBadge status={failed.length ? "FAIL" : (b.checks ?? []).length ? "PASS" : "PENDING"} label={failed.length ? failed.join(", ") : chk?.can_submit ? "ready to submit" : "passes"} compact />
+              <a className="flex items-center gap-1 text-[11px] text-[var(--accent)]" href={`https://platform.worldquantbrain.com/alpha/${b.brain_id}`} target="_blank" rel="noreferrer">
+                {b.brain_id} <ExternalLink size={11} />
+              </a>
+            </div>
+            <div className="tnum text-ink2">
+              Sharpe {fmt.num(m.sharpe)} · Fitness {fmt.num(m.fitness)} · TO {fmt.pct(m.turnover)} · Returns {fmt.pct(m.returns, 2)}
+            </div>
+            {chk && (chk.self_corr != null || chk.prod_corr != null) && (
+              <div className="tnum text-muted">self-corr {fmt.num(chk.self_corr)} · prod-corr {fmt.num(chk.prod_corr)}</div>
+            )}
+          </div>
+        );
+      })}
+    </Card>
+  );
+}
+
 function AlphaDrawer({ id, onClose }: { id: number | null; onClose: () => void }) {
   const { data, isFetching } = useQuery({ queryKey: ["alpha", id], queryFn: () => api.alpha(id!), enabled: id !== null });
   const [notes, setNotes] = useState("");
@@ -172,6 +203,20 @@ function AlphaDrawer({ id, onClose }: { id: number | null; onClose: () => void }
                   <button className="btn" onClick={() => { copyText(JSON.stringify(brainPayload(a.expr, a.settings), null, 2)); toast.success("BRAIN payload copied"); }}>
                     <Braces size={13} /> BRAIN JSON
                   </button>
+                  <button
+                    className="btn"
+                    title="Simulate on BRAIN itself (needs the BRAIN connection); the real metrics and checks are stored here"
+                    onClick={async () => {
+                      try {
+                        const r = await api.brain.simulate({ alpha_ids: [a.id] });
+                        toast.success(`Sent to BRAIN (job #${r.id})`);
+                      } catch (e) {
+                        toast.error(String((e as Error).message));
+                      }
+                    }}
+                  >
+                    <CloudUpload size={13} /> Run on BRAIN
+                  </button>
                   <button className={clsx("btn", !!a.starred && "!text-[var(--warn-text)]")} onClick={() => patch({ starred: !a.starred })}>
                     <Star size={13} /> {a.starred ? "Starred" : "Star"}
                   </button>
@@ -207,6 +252,8 @@ function AlphaDrawer({ id, onClose }: { id: number | null; onClose: () => void }
                     <DescriptionCard r={data.result} />
                   </div>
                   <div className="flex flex-col gap-3 xl:col-span-4">
+                    <BrainRows id={a.id} />
+                    <QualityCard r={data.result} />
                     <ChecksList r={data.result} />
                     <RobustnessCard r={data.result} />
                     {data.brain.length > 0 && (
@@ -227,9 +274,12 @@ function AlphaDrawer({ id, onClose }: { id: number | null; onClose: () => void }
                   </div>
                 </div>
               ) : (
-                <Card title="BRAIN-only alpha">
-                  <div className="text-[12px] text-muted">Not simulated locally: {(a.brain_only_reasons ?? []).join("; ") || "uses BRAIN-only data"}. Export it and test on BRAIN, then import the results.</div>
-                </Card>
+                <div className="flex flex-col gap-3">
+                  <Card title="BRAIN-only alpha">
+                    <div className="text-[12px] text-muted">Not simulated locally: {(a.brain_only_reasons ?? []).join("; ") || "uses BRAIN-only data"}. Use Run on BRAIN (with the BRAIN connection) or export it and import the results.</div>
+                  </Card>
+                  <BrainRows id={a.id} />
+                </div>
               )}
             </div>
           )}
@@ -242,7 +292,7 @@ function AlphaDrawer({ id, onClose }: { id: number | null; onClose: () => void }
 export default function Library() {
   const [params, setParams] = useSearchParams();
   const [search, setSearch] = useState("");
-  const [f, setF] = useState<ListParams>({ sort: "fitness", desc: true });
+  const [f, setF] = useState<ListParams>({ sort: "quality", desc: true });
   const [sel, setSel] = useState<Set<number>>(new Set());
   const [modal, setModal] = useState<"" | "export" | "corr" | "combine">("");
   const openId = params.get("open") ? Number(params.get("open")) : null;
@@ -278,6 +328,17 @@ export default function Library() {
         nav(`/miner?job=${r.id}`);
         return;
       }
+      if (what === "brain") {
+        const r = await api.brain.simulate({ alpha_ids: ids });
+        toast.success(`Sent ${ids.length} alpha(s) to BRAIN (job #${r.id})`);
+        nav(`/brain?job=${r.id}`);
+        return;
+      }
+      if (what === "compose") {
+        const r = await api.startJob("compose", { alpha_ids: ids, n: 24 });
+        nav(`/miner?job=${r.id}`);
+        return;
+      }
       if (what === "gp") {
         const exprs = rows.filter((r) => sel.has(r.id)).map((r) => r.expr);
         const r = await api.startJob("gp", { seed_exprs: exprs, seed_from_library: false, population: 40, generations: 10 });
@@ -306,6 +367,9 @@ export default function Library() {
         <Select value={f.origin ?? ""} onChange={(x) => setFilter("origin", x)} options={[{ value: "", label: "Any origin" }, ...Object.keys(facets?.origin ?? {})]} />
         <Select value={f.family ?? ""} onChange={(x) => setFilter("family", x)} options={[{ value: "", label: "Any idea" }, ...Object.keys(facets?.idea ?? {})]} />
         <Select value={f.category ?? ""} onChange={(x) => setFilter("category", x)} options={[{ value: "", label: "Any data" }, ...Object.keys(facets?.category ?? {})]} />
+        <Select value={f.grade ?? ""} onChange={(x) => setFilter("grade", x)} options={[{ value: "", label: "Any grade" }, { value: "A", label: "Grade A (BRAIN-ready)" }, { value: "A,B", label: "Grade A or B" }, { value: "A,B,C", label: "Grade A-C" }]} />
+        <Select value={f.brain ?? ""} onChange={(x) => setFilter("brain", x)} options={[{ value: "", label: "Any BRAIN status" }, { value: "tested", label: "Tested on BRAIN" }, { value: "ready", label: "BRAIN: ready to submit" }, { value: "passed", label: "BRAIN: passed" }, { value: "failed", label: "BRAIN: failed" }, { value: "untested", label: "Not tested" }]} />
+        <Select value={f.data_source ?? ""} onChange={(x) => setFilter("data_source", x)} options={[{ value: "", label: "Any dataset" }, { value: "real", label: "Mined on real data" }, { value: "demo", label: "Mined on demo data" }]} />
         <input className="input w-24 tnum" type="number" step={0.1} placeholder="min Sharpe" value={f.min_sharpe ?? ""} onChange={(e) => setFilter("min_sharpe", e.target.value === "" ? undefined : Number(e.target.value))} />
         <Toggle checked={!!f.starred} onChange={(x) => setFilter("starred", x || undefined)} label="Starred" />
         <Toggle checked={!!f.submitted} onChange={(x) => setFilter("submitted", x || undefined)} label="Submitted" />
@@ -321,6 +385,8 @@ export default function Library() {
         <button className="btn" disabled={ids.length < 2} onClick={() => setModal("combine")}><Layers size={13} /> Combine</button>
         <button className="btn" disabled={!ids.length} onClick={() => bulk("optimize")}><SlidersHorizontal size={13} /> Optimize settings</button>
         <button className="btn" disabled={!ids.length} onClick={() => bulk("gp")}><Dna size={13} /> Refine with GP</button>
+        <button className="btn" disabled={ids.length < 2} onClick={() => bulk("compose")} title="Build multi-statement (complex) alphas from the selected, decorrelated alphas"><Blocks size={13} /> Compose complex</button>
+        <button className="btn" disabled={!ids.length} onClick={() => bulk("brain")} title="Simulate the selection on BRAIN (needs the BRAIN connection)"><CloudUpload size={13} /> Run on BRAIN</button>
         <button className="btn" disabled={!ids.length} onClick={() => bulk("star")}><Star size={13} /> Star</button>
         <button className="btn" disabled={!ids.length} onClick={() => bulk("submit")}>Mark submitted</button>
         <button className="btn" disabled={!ids.length} onClick={() => bulk("unsubmit")}>Unmark</button>
@@ -333,6 +399,7 @@ export default function Library() {
           <span>★</span>
           {sortHeader("id", "#", false)}
           <span>STATUS</span>
+          {sortHeader("quality", "Grade", false)}
           {sortHeader("sharpe", "Sharpe")}
           {sortHeader("fitness", "Fitness")}
           {sortHeader("turnover", "TO")}
@@ -363,6 +430,7 @@ export default function Library() {
                     <span className={a.starred ? "text-[var(--warn-text)]" : "text-muted"}>{a.starred ? "★" : "☆"}</span>
                     <span className="text-muted">{a.id}</span>
                     <StatusBadge status={a.status_local} compact />
+                    <GradeBadge grade={a.grade} />
                     <span className="text-right">{fmt.num(a.sharpe)}</span>
                     <span className="text-right">{fmt.num(a.fitness)}</span>
                     <span className="text-right">{fmt.pct(a.turnover, 0)}</span>
@@ -372,7 +440,9 @@ export default function Library() {
                     <span className="text-right">{a.pass_prob != null ? `${Math.round(a.pass_prob * 100)}%` : "—"}</span>
                     <span className="text-right">{fmt.num(a.max_corr)}</span>
                     <span className="truncate text-ink2">{a.idea}</span>
-                    <span className="truncate text-ink2">{a.submitted ? "submitted" : a.status_brain}</span>
+                    <span className={clsx("truncate", a.data_source === "demo" ? "text-[var(--warn-text)]" : "text-ink2")} title={a.data_source === "demo" ? "Mined on the synthetic demo data: will not transfer to BRAIN" : undefined}>
+                      {a.data_source === "demo" ? "demo data" : a.submitted ? "submitted" : a.status_brain}
+                    </span>
                     <span className="mono truncate text-ink2" title={a.expr}>{a.expr}</span>
                   </div>
                 );
